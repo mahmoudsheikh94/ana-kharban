@@ -7,5 +7,7 @@ out/
 dist/
 coverage/
 .turbo/
+supabase/.temp/
+tsconfig.tsbuildinfo
 *.log
 .DS_Store
