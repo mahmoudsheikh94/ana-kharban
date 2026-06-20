@@ -144,5 +144,25 @@ describe("telegram reporting flow", () => {
 
     expect(result.conversation.state).toBe("awaiting_phone");
     expect(result.reply).toContain("رقم هاتف صحيح");
+    expect(result.invalidAttempt).toBe(true);
+  });
+
+  it("marks random text at the photo step as an invalid attempt", () => {
+    const conversation = {
+      ...createInitialConversation("20", "10"),
+      state: "awaiting_photo" as const,
+      draft: { fullName: "ليان أبو زيد", phoneNumber: "+962790000101" }
+    };
+
+    const result = buildNextStep(conversation, {
+      kind: "text",
+      text: "ما رأيك بهذه المشكلة؟",
+      chatId: "10",
+      telegramUserId: "20",
+      messageId: 4
+    });
+
+    expect(result.conversation.state).toBe("awaiting_photo");
+    expect(result.invalidAttempt).toBe(true);
   });
 });

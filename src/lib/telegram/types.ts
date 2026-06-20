@@ -16,6 +16,7 @@ export type TelegramDraft = {
   longitude?: number;
   userDescription?: string | null;
   reportId?: string;
+  invalidAttempts?: number;
 };
 
 export type TelegramConversation = {
@@ -68,4 +69,5 @@ export type FlowResult = {
   reply: string;
   readyToSubmit: boolean;
   action?: "create_and_analyze" | "confirm_ai" | "reanalyze_with_description";
+  invalidAttempt?: boolean;
 };

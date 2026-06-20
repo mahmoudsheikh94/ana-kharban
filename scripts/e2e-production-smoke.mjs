@@ -42,6 +42,12 @@ await expectStatus("dashboard accepts admin cookie", `${baseUrl}/dashboard`, 200
   }
 });
 
+await expectStatus("abuse dashboard accepts admin cookie", `${baseUrl}/abuse`, 200, {
+  headers: {
+    cookie: `ana_kharban_admin=${adminCookie}`
+  }
+});
+
 await expectStatus("telegram webhook rejects missing secret", `${baseUrl}/api/telegram/webhook`, 401, {
   method: "POST",
   headers: { "content-type": "application/json" },

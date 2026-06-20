@@ -1,3 +1,4 @@
+import { evaluateSubmissionGuard, recordInvalidAttempt, type SubmissionGuardReason } from "@/lib/abuse/policy";
 import { analyzeReportWithGemini } from "@/lib/ai/gemini";
 import { inferJordanArea } from "@/lib/geo/jordan";
 import {
@@ -6,14 +7,18 @@ import {
   clearTelegramConversation,
   createTelegramReport,
   enforceTelegramRateLimit,
+  getTelegramAbuseGuardContext,
   getCitizenReportStatus,
   getTelegramConversation,
+  markReportForManualAiReview,
+  recordAiUsageEvent,
+  recordTelegramAbuseEvent,
   updateReportCitizenDescription,
   updateReportWithAiAnalysis,
   uploadReportImage,
   upsertTelegramConversation
 } from "@/lib/supabase/ingestion";
-import { getTelegramWebhookSecret } from "@/lib/supabase/config";
+import { getAbuseLimits, getTelegramWebhookSecret } from "@/lib/supabase/config";
 import { downloadTelegramFile, sendTelegramMessage } from "@/lib/telegram/api";
 import { buildNextStep, isCompleteDraft } from "@/lib/telegram/flow";
 import { normalizeTelegramUpdate } from "@/lib/telegram/update";
@@ -30,6 +35,17 @@ type CompleteTelegramDraft = {
   longitude: number;
   userDescription?: string | null;
   reportId?: string;
+};
+
+const guardReasonMessages: Record<SubmissionGuardReason, string> = {
+  blocked_user: "لا يمكن استقبال بلاغات من هذا الحساب حالياً.",
+  outside_jordan: "هذه المنصة مخصصة للبلاغات داخل الأردن فقط. تأكد من الموقع وأعد المحاولة.",
+  duplicate_file: "يبدو أن هذه الصورة أُرسلت سابقاً. لن ننشئ بلاغاً مكرراً.",
+  duplicate_nearby_report: "يوجد بلاغ قريب جداً من نفس الحساب خلال آخر 24 ساعة. لن ننشئ بلاغاً مكرراً.",
+  user_weekly_report_limit: "وصلت للحد الأسبوعي للبلاغات. جرّب لاحقاً إذا ظهرت مشكلة جديدة.",
+  user_daily_ai_limit: "وصلت للحد اليومي للتحليل الآلي. سنحفظ البلاغ للمراجعة اليدوية بدون استخدام AI.",
+  global_daily_ai_limit: "وصلت المنصة للحد اليومي للتحليل الآلي. سنحفظ البلاغ للمراجعة اليدوية بدون استخدام AI.",
+  reanalysis_limit: "يمكن تعديل تحليل البلاغ مرة واحدة فقط. سيبقى البلاغ للمراجعة اليدوية إذا لزم."
 };
 
 function toCompleteDraft(draft: ReturnType<typeof buildNextStep>["conversation"]["draft"]): CompleteTelegramDraft | null {
@@ -77,14 +93,20 @@ async function createAndAnalyzeReport({
   telegramUserId,
   chatId,
   messageId,
-  draft
+  draft,
+  maxImageBytes
 }: {
   telegramUserId: string;
   chatId: string;
   messageId?: number;
   draft: CompleteTelegramDraft;
+  maxImageBytes: number;
 }) {
   const image = await downloadTelegramFile(draft.photoFileId);
+  if (image.bytes.byteLength > maxImageBytes) {
+    throw new Error(`Telegram image exceeds maximum size: ${image.bytes.byteLength}`);
+  }
+
   const imageUrl = await uploadReportImage({
     telegramUserId,
     bytes: image.bytes,
@@ -111,10 +133,53 @@ async function createAndAnalyzeReport({
     longitude: draft.longitude,
     userDescription: draft.userDescription ?? null
   });
+  await recordAiUsageEvent({ telegramUserId, reportId, purpose: "initial_analysis" });
   await updateReportWithAiAnalysis(reportId, analysis);
   await attachTelegramReportToConversation({ telegramUserId, reportId });
 
   return { reportId, analysis };
+}
+
+async function createManualReviewReport({
+  telegramUserId,
+  chatId,
+  messageId,
+  draft,
+  maxImageBytes,
+  reason
+}: {
+  telegramUserId: string;
+  chatId: string;
+  messageId?: number;
+  draft: CompleteTelegramDraft;
+  maxImageBytes: number;
+  reason: string;
+}) {
+  const image = await downloadTelegramFile(draft.photoFileId);
+  if (image.bytes.byteLength > maxImageBytes) {
+    throw new Error(`Telegram image exceeds maximum size: ${image.bytes.byteLength}`);
+  }
+
+  const imageUrl = await uploadReportImage({
+    telegramUserId,
+    bytes: image.bytes,
+    contentType: image.contentType,
+    extension: image.extension
+  });
+
+  const reportId = await createTelegramReport({
+    telegramUserId,
+    chatId,
+    messageId,
+    photoFileId: draft.photoFileId,
+    imageUrl,
+    draft
+  });
+
+  await markReportForManualAiReview({ reportId, reason });
+  await clearTelegramConversation(telegramUserId);
+
+  return reportId;
 }
 
 async function reanalyzeReportWithDescription({
@@ -141,6 +206,7 @@ async function reanalyzeReportWithDescription({
     userDescription
   });
 
+  await recordAiUsageEvent({ telegramUserId, reportId, purpose: "reanalyze_with_description" });
   await updateReportWithAiAnalysis(reportId, analysis);
   await clearTelegramConversation(telegramUserId);
 
@@ -209,7 +275,40 @@ export async function POST(request: Request) {
 
   const existingConversation = await getTelegramConversation(input.telegramUserId);
   const step = buildNextStep(existingConversation, input);
-  await upsertTelegramConversation(step.conversation);
+
+  if (step.invalidAttempt) {
+    const limits = getAbuseLimits();
+    const invalid = recordInvalidAttempt(step.conversation.draft.invalidAttempts, limits.maxInvalidAttempts);
+
+    if (invalid.locked) {
+      await recordTelegramAbuseEvent({
+        telegramUserId: input.telegramUserId,
+        eventType: "invalid_attempt_limit",
+        detail: { state: step.conversation.state, messageId: input.messageId }
+      });
+      await clearTelegramConversation(input.telegramUserId);
+      await sendTelegramMessage(input.chatId, "تم إيقاف البلاغ الحالي بسبب كثرة الرسائل غير المناسبة. أرسل /start للبدء من جديد.");
+      return NextResponse.json({ ok: true });
+    }
+
+    await upsertTelegramConversation({
+      ...step.conversation,
+      draft: {
+        ...step.conversation.draft,
+        invalidAttempts: invalid.invalidAttempts
+      }
+    });
+    await sendTelegramMessage(input.chatId, step.reply);
+    return NextResponse.json({ ok: true });
+  }
+
+  await upsertTelegramConversation({
+    ...step.conversation,
+    draft: {
+      ...step.conversation.draft,
+      invalidAttempts: undefined
+    }
+  });
   await sendTelegramMessage(input.chatId, step.reply);
 
   if (!step.action) {
@@ -226,11 +325,55 @@ export async function POST(request: Request) {
 
   try {
     if (step.action === "create_and_analyze") {
+      const limits = getAbuseLimits();
+      const guardContext = await getTelegramAbuseGuardContext({
+        telegramUserId: input.telegramUserId,
+        photoFileId: completeDraft.photoFileId,
+        latitude: completeDraft.latitude,
+        longitude: completeDraft.longitude
+      });
+      const guard = evaluateSubmissionGuard({
+        action: step.action,
+        latitude: completeDraft.latitude,
+        longitude: completeDraft.longitude,
+        limits,
+        ...guardContext
+      });
+
+      if (!guard.allowed) {
+        await recordTelegramAbuseEvent({
+          telegramUserId: input.telegramUserId,
+          eventType: guard.reason,
+          detail: { mode: guard.mode, latitude: completeDraft.latitude, longitude: completeDraft.longitude }
+        });
+
+        if (guard.mode === "reject") {
+          await clearTelegramConversation(input.telegramUserId);
+          await sendTelegramMessage(input.chatId, guardReasonMessages[guard.reason]);
+          return NextResponse.json({ ok: true });
+        }
+
+        const reportId = await createManualReviewReport({
+          telegramUserId: input.telegramUserId,
+          chatId: input.chatId,
+          messageId: input.messageId,
+          draft: completeDraft,
+          maxImageBytes: limits.maxImageBytes,
+          reason: guardReasonMessages[guard.reason]
+        });
+        await sendTelegramMessage(
+          input.chatId,
+          `تم حفظ البلاغ للمراجعة اليدوية بدون تحليل AI.\nرقم التتبع: <code>${reportId}</code>`
+        );
+        return NextResponse.json({ ok: true });
+      }
+
       const { reportId, analysis } = await createAndAnalyzeReport({
         telegramUserId: input.telegramUserId,
         chatId: input.chatId,
         messageId: input.messageId,
-        draft: completeDraft
+        draft: completeDraft,
+        maxImageBytes: limits.maxImageBytes
       });
       await sendTelegramMessage(
         input.chatId,
@@ -257,11 +400,40 @@ export async function POST(request: Request) {
     }
 
     if (step.action === "reanalyze_with_description") {
+      const limits = getAbuseLimits();
       const reportId = completeDraft.reportId;
       const userDescription = completeDraft.userDescription;
 
       if (!reportId || !userDescription) {
         await sendTelegramMessage(input.chatId, "لم أجد البلاغ أو الوصف المرتبط بهذه المحادثة. أرسل /start لبلاغ جديد.");
+        return NextResponse.json({ ok: true });
+      }
+
+      const guardContext = await getTelegramAbuseGuardContext({
+        telegramUserId: input.telegramUserId,
+        photoFileId: completeDraft.photoFileId,
+        latitude: completeDraft.latitude,
+        longitude: completeDraft.longitude,
+        reportId
+      });
+      const guard = evaluateSubmissionGuard({
+        action: step.action,
+        latitude: completeDraft.latitude,
+        longitude: completeDraft.longitude,
+        limits,
+        ...guardContext
+      });
+
+      if (!guard.allowed) {
+        await recordTelegramAbuseEvent({
+          telegramUserId: input.telegramUserId,
+          eventType: guard.reason,
+          detail: { mode: guard.mode, reportId }
+        });
+        await updateReportCitizenDescription({ reportId, userDescription });
+        await markReportForManualAiReview({ reportId, reason: guardReasonMessages[guard.reason] });
+        await clearTelegramConversation(input.telegramUserId);
+        await sendTelegramMessage(input.chatId, `${guardReasonMessages[guard.reason]}\nرقم التتبع: <code>${reportId}</code>`);
         return NextResponse.json({ ok: true });
       }
 

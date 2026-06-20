@@ -55,7 +55,8 @@ export function buildNextStep(
       return {
         conversation: withMessage(conversation, input.messageId),
         reply: "أرسل الاسم الكامل نصاً، مثال: ليان أبو زيد.",
-        readyToSubmit: false
+        readyToSubmit: false,
+        invalidAttempt: true
       };
     }
 
@@ -80,7 +81,8 @@ export function buildNextStep(
       return {
         conversation: withMessage(conversation, input.messageId),
         reply: "أرسل رقم هاتف صحيح، مثال: +962790000000.",
-        readyToSubmit: false
+        readyToSubmit: false,
+        invalidAttempt: true
       };
     }
 
@@ -103,7 +105,8 @@ export function buildNextStep(
       return {
         conversation: withMessage(conversation, input.messageId),
         reply: "أرسل صورة البلاغ كصورة من تيليجرام، وليس ملفاً أو نصاً.",
-        readyToSubmit: false
+        readyToSubmit: false,
+        invalidAttempt: true
       };
     }
 
@@ -126,7 +129,8 @@ export function buildNextStep(
       return {
         conversation: withMessage(conversation, input.messageId),
         reply: "أرسل موقع GPS من تيليجرام حتى نربط البلاغ بالمكان الصحيح.",
-        readyToSubmit: false
+        readyToSubmit: false,
+        invalidAttempt: true
       };
     }
 
@@ -154,7 +158,8 @@ export function buildNextStep(
       return {
         conversation: withMessage(conversation, input.messageId),
         reply: "هل التحليل صحيح؟ أرسل نعم للتأكيد أو لا لإضافة وصف قصير.",
-        readyToSubmit: false
+        readyToSubmit: false,
+        invalidAttempt: true
       };
     }
 
@@ -190,7 +195,8 @@ export function buildNextStep(
     return {
       conversation: withMessage(conversation, input.messageId),
       reply: "لم أفهم الرد. أرسل نعم إذا كان التحليل صحيحاً، أو لا لإضافة وصف.",
-      readyToSubmit: false
+      readyToSubmit: false,
+      invalidAttempt: true
     };
   }
 
@@ -199,7 +205,8 @@ export function buildNextStep(
       return {
         conversation: withMessage(conversation, input.messageId),
         reply: "اكتب وصفاً أوضح للمشكلة في رسالة نصية قصيرة.",
-        readyToSubmit: false
+        readyToSubmit: false,
+        invalidAttempt: true
       };
     }
 

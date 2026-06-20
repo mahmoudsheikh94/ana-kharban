@@ -26,6 +26,11 @@ TELEGRAM_BOT_USERNAME=
 TELEGRAM_WEBHOOK_SECRET=
 GEMINI_API_KEY=
 APP_BASE_URL=
+AI_DAILY_USER_LIMIT=3
+AI_DAILY_GLOBAL_LIMIT=100
+REPORTS_WEEKLY_USER_LIMIT=10
+TELEGRAM_MAX_INVALID_ATTEMPTS=3
+TELEGRAM_MAX_IMAGE_BYTES=6291456
 ```
 
 `SUPABASE_SECRET_KEY` is used only by server-side dashboard queries. Do not expose it with a `NEXT_PUBLIC_` prefix.
@@ -169,6 +174,10 @@ Already implemented:
 - server-only Supabase secret key usage
 - Telegram webhook secret validation
 - Telegram webhook rate limiting per Telegram user ID
+- Telegram abuse controls before Gemini calls
+- per-user and global Gemini daily limits
+- weekly report limits, duplicate report checks, Jordan GPS checks, and one re-analysis per report
+- admin abuse dashboard with block/unblock controls
 - basic security headers from Next.js
 - RLS enabled on public tables
 - report images stored in Supabase Storage
@@ -181,10 +190,9 @@ Before public launch:
 - deploy behind HTTPS
 - set `APP_BASE_URL` and run `npm run telegram:set-webhook`
 - replace the simple admin password with Supabase Auth or another real admin auth provider
-- add rate limiting to `/api/telegram/webhook`
-- add abuse/spam review for repeated Telegram IDs and phone numbers
 - publish privacy/consent text for storing name, phone, Telegram ID, photo, and GPS
 - monitor Supabase Storage usage and Gemini costs
+- set provider-level Google/Gemini billing alerts and quotas as a final backstop
 
 ## Verification
 

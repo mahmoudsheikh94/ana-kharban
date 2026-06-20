@@ -15,6 +15,18 @@ type StoredConversation = {
   last_message_id: number | null;
 };
 
+function startOfDayIso() {
+  const date = new Date();
+  date.setUTCHours(0, 0, 0, 0);
+  return date.toISOString();
+}
+
+function startOfWeekIso() {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - 7);
+  return date.toISOString();
+}
+
 export async function getTelegramConversation(telegramUserId: string) {
   const supabase = createSupabaseServerClient();
   const { data, error } = await supabase
@@ -232,6 +244,51 @@ export async function updateReportWithAiAnalysis(reportId: string, analysis: AiR
   });
 }
 
+export async function markReportForManualAiReview({
+  reportId,
+  reason
+}: {
+  reportId: string;
+  reason: string;
+}) {
+  const supabase = createSupabaseServerClient();
+  const { data: current, error: currentError } = await supabase
+    .from("reports")
+    .select("ai_validation_status")
+    .eq("id", reportId)
+    .single();
+
+  if (currentError) {
+    throw new Error(`Failed to load current AI status: ${currentError.message}`);
+  }
+
+  const { error } = await supabase
+    .from("reports")
+    .update({
+      ai_category: "مراجعة يدوية",
+      ai_severity: "medium",
+      ai_confidence: 0,
+      ai_validation_status: "needs_more_info",
+      ai_validation_reason: reason,
+      ai_image_analysis: "تم تخطي تحليل Gemini بسبب حدود الحماية من إساءة الاستخدام.",
+      generated_complaint_arabic: "يحتاج هذا البلاغ إلى مراجعة يدوية قبل إرساله للجهة المختصة."
+    })
+    .eq("id", reportId);
+
+  if (error) {
+    throw new Error(`Failed to mark report for manual AI review: ${error.message}`);
+  }
+
+  await addReportStatusHistory({
+    reportId,
+    actor: "system",
+    event: "ai_review_skipped",
+    fromStatus: current.ai_validation_status,
+    toStatus: "needs_more_info",
+    note: reason
+  });
+}
+
 export async function attachTelegramReportToConversation({
   telegramUserId,
   reportId
@@ -279,6 +336,193 @@ export async function updateReportCitizenDescription({
     event: "citizen_description_added",
     note: userDescription
   });
+}
+
+export async function recordAiUsageEvent({
+  telegramUserId,
+  reportId,
+  purpose
+}: {
+  telegramUserId: string;
+  reportId: string;
+  purpose: "initial_analysis" | "reanalyze_with_description";
+}) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase.from("ai_usage_events").insert({
+    telegram_user_id: telegramUserId,
+    report_id: reportId,
+    purpose
+  });
+
+  if (error) {
+    throw new Error(`Failed to record AI usage event: ${error.message}`);
+  }
+}
+
+export async function recordTelegramAbuseEvent({
+  telegramUserId,
+  eventType,
+  detail
+}: {
+  telegramUserId: string;
+  eventType: string;
+  detail?: Record<string, unknown>;
+}) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase.from("telegram_abuse_events").insert({
+    telegram_user_id: telegramUserId,
+    event_type: eventType,
+    detail: detail ?? {}
+  });
+
+  if (error) {
+    throw new Error(`Failed to record Telegram abuse event: ${error.message}`);
+  }
+}
+
+export async function getTelegramAbuseGuardContext({
+  telegramUserId,
+  photoFileId,
+  latitude,
+  longitude,
+  reportId
+}: {
+  telegramUserId: string;
+  photoFileId?: string;
+  latitude: number;
+  longitude: number;
+  reportId?: string;
+}) {
+  const supabase = createSupabaseServerClient();
+  const today = startOfDayIso();
+  const week = startOfWeekIso();
+
+  const [
+    blockedResult,
+    userAiResult,
+    globalAiResult,
+    reporterResult,
+    duplicateFileResult,
+    reanalysisResult
+  ] = await Promise.all([
+    supabase.from("telegram_blocked_users").select("telegram_user_id").eq("telegram_user_id", telegramUserId).maybeSingle(),
+    supabase
+      .from("ai_usage_events")
+      .select("id", { count: "exact", head: true })
+      .eq("telegram_user_id", telegramUserId)
+      .gte("created_at", today),
+    supabase.from("ai_usage_events").select("id", { count: "exact", head: true }).gte("created_at", today),
+    supabase.from("reporters").select("id").eq("telegram_user_id", telegramUserId).maybeSingle(),
+    photoFileId
+      ? supabase.from("reports").select("id", { count: "exact", head: true }).eq("telegram_file_id", photoFileId)
+      : Promise.resolve({ count: 0, error: null }),
+    reportId
+      ? supabase
+          .from("ai_usage_events")
+          .select("id", { count: "exact", head: true })
+          .eq("report_id", reportId)
+          .eq("purpose", "reanalyze_with_description")
+      : Promise.resolve({ count: 0, error: null })
+  ]);
+
+  for (const result of [blockedResult, userAiResult, globalAiResult, reporterResult, duplicateFileResult, reanalysisResult]) {
+    if (result.error) {
+      throw new Error(`Failed to load Telegram abuse guard context: ${result.error.message}`);
+    }
+  }
+
+  const reporterId = reporterResult.data?.id as string | undefined;
+  let userReportsThisWeek = 0;
+  let duplicateNearbyReport = false;
+
+  if (reporterId) {
+    const [weeklyResult, nearbyResult] = await Promise.all([
+      supabase
+        .from("reports")
+        .select("id", { count: "exact", head: true })
+        .eq("reporter_id", reporterId)
+        .eq("source", "telegram")
+        .gte("created_at", week),
+      supabase
+        .from("reports")
+        .select("id")
+        .eq("reporter_id", reporterId)
+        .eq("source", "telegram")
+        .gte("created_at", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+        .gte("latitude", latitude - 0.0015)
+        .lte("latitude", latitude + 0.0015)
+        .gte("longitude", longitude - 0.0015)
+        .lte("longitude", longitude + 0.0015)
+        .limit(1)
+    ]);
+
+    if (weeklyResult.error || nearbyResult.error) {
+      throw new Error(`Failed to load Telegram report guard context: ${weeklyResult.error?.message ?? nearbyResult.error?.message}`);
+    }
+
+    userReportsThisWeek = weeklyResult.count ?? 0;
+    duplicateNearbyReport = Boolean(nearbyResult.data?.length);
+  }
+
+  return {
+    blocked: Boolean(blockedResult.data),
+    userAiCallsToday: userAiResult.count ?? 0,
+    globalAiCallsToday: globalAiResult.count ?? 0,
+    userReportsThisWeek,
+    duplicateFile: (duplicateFileResult.count ?? 0) > 0,
+    duplicateNearbyReport,
+    reanalysisCountForReport: reanalysisResult.count ?? 0
+  };
+}
+
+export async function getTelegramAbuseAdminData() {
+  const supabase = createSupabaseServerClient();
+  const since = startOfDayIso();
+  const [eventsResult, blockedResult, usageResult] = await Promise.all([
+    supabase.from("telegram_abuse_events").select("*").order("created_at", { ascending: false }).limit(100),
+    supabase.from("telegram_blocked_users").select("*").order("blocked_at", { ascending: false }),
+    supabase.from("ai_usage_events").select("telegram_user_id, created_at").gte("created_at", since)
+  ]);
+
+  if (eventsResult.error || blockedResult.error || usageResult.error) {
+    throw new Error(
+      `Failed to load abuse admin data: ${eventsResult.error?.message ?? blockedResult.error?.message ?? usageResult.error?.message}`
+    );
+  }
+
+  return {
+    events: eventsResult.data ?? [],
+    blockedUsers: blockedResult.data ?? [],
+    aiUsageToday: usageResult.data ?? []
+  };
+}
+
+export async function blockTelegramUser({
+  telegramUserId,
+  reason
+}: {
+  telegramUserId: string;
+  reason: string;
+}) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase.from("telegram_blocked_users").upsert({
+    telegram_user_id: telegramUserId,
+    reason,
+    blocked_by: "admin"
+  });
+
+  if (error) {
+    throw new Error(`Failed to block Telegram user: ${error.message}`);
+  }
+}
+
+export async function unblockTelegramUser(telegramUserId: string) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase.from("telegram_blocked_users").delete().eq("telegram_user_id", telegramUserId);
+
+  if (error) {
+    throw new Error(`Failed to unblock Telegram user: ${error.message}`);
+  }
 }
 
 export async function updateReportManualStatus({

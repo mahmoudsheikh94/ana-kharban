@@ -61,3 +61,24 @@ export function getGeminiApiKey() {
 
   return key;
 }
+
+function readPositiveIntegerEnv(name: string, fallback: number) {
+  const raw = process.env[name];
+
+  if (!raw) {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+export function getAbuseLimits() {
+  return {
+    userDailyAiLimit: readPositiveIntegerEnv("AI_DAILY_USER_LIMIT", 3),
+    globalDailyAiLimit: readPositiveIntegerEnv("AI_DAILY_GLOBAL_LIMIT", 100),
+    userWeeklyReportLimit: readPositiveIntegerEnv("REPORTS_WEEKLY_USER_LIMIT", 10),
+    maxInvalidAttempts: readPositiveIntegerEnv("TELEGRAM_MAX_INVALID_ATTEMPTS", 3),
+    maxImageBytes: readPositiveIntegerEnv("TELEGRAM_MAX_IMAGE_BYTES", 6 * 1024 * 1024)
+  };
+}

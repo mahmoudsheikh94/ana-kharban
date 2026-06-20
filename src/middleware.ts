@@ -7,7 +7,8 @@ export async function middleware(request: NextRequest) {
     pathname === "/" ||
     pathname.startsWith("/dashboard") ||
     pathname.startsWith("/reports") ||
-    pathname.startsWith("/map");
+    pathname.startsWith("/map") ||
+    pathname.startsWith("/abuse");
 
   if (!isProtectedRoute) {
     return NextResponse.next();
@@ -32,5 +33,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/", "/dashboard/:path*", "/reports/:path*", "/map/:path*"]
+  matcher: ["/", "/dashboard/:path*", "/reports/:path*", "/map/:path*", "/abuse/:path*"]
 };
