@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Noto_Kufi_Arabic } from "next/font/google";
+import "leaflet/dist/leaflet.css";
 import "./globals.css";
 
 const arabicFont = Noto_Kufi_Arabic({
