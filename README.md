@@ -1,6 +1,6 @@
 # أنا خربان
 
-MVP admin dashboard for civic reports submitted through a Telegram bot. Citizens report public issues in Jordan with identity, phone, Telegram ID, photo, GPS location, and an optional description. The dashboard lets an admin inspect, filter, and visualize the reports stored in Supabase.
+MVP admin dashboard for civic reports submitted through a Telegram bot. Citizens report public issues in Jordan with identity, phone, Telegram ID, photo, and GPS location. Gemini analyzes the report, then the citizen confirms the AI result or adds a short correction. The dashboard lets an admin inspect, filter, and visualize the reports stored in Supabase.
 
 ## Stack
 
@@ -97,9 +97,6 @@ The bot flow collects:
 2. phone number
 3. photo
 4. GPS location
-5. optional description
-
-After the final step, the webhook:
 
 - downloads the Telegram photo
 - uploads it to Supabase Storage
@@ -108,7 +105,10 @@ After the final step, the webhook:
 - runs Gemini image/location analysis
 - updates AI fields on the report
 - records status history
-- replies to the citizen with the tracking ID
+- replies to the citizen with the tracking ID and AI analysis
+- asks the citizen to confirm the analysis or reject it and write a correction
+
+If the citizen rejects the AI analysis, the bot asks for a short description, updates the existing report, re-runs Gemini with that description, and stores the corrected result.
 
 Citizen commands:
 
@@ -199,6 +199,12 @@ Or run the full local verification gate:
 
 ```bash
 npm run verify
+```
+
+Run production smoke E2E checks after deploy:
+
+```bash
+npm run e2e:prod
 ```
 
 When switching between `npm run build` and local development, prefer:

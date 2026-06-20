@@ -23,11 +23,23 @@ function isPhoneNumber(value: string) {
   return /^\+?[0-9\s-]{8,18}$/.test(value.trim());
 }
 
+function normalizeText(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isAffirmative(value: string) {
+  return ["نعم", "اه", "آه", "ايوه", "أيوه", "yes", "y", "ok", "تمام", "/confirm"].includes(normalizeText(value));
+}
+
+function isNegative(value: string) {
+  return ["لا", "no", "n", "غلط", "خطأ", "مش صحيح", "/wrong"].includes(normalizeText(value));
+}
+
 export function buildNextStep(
   currentConversation: TelegramConversation | null,
   input: NormalizedTelegramInput
 ): FlowResult {
-  if (input.kind === "text" && ["/start", "ابدأ", "start"].includes(input.text.trim().toLowerCase())) {
+  if (input.kind === "text" && ["/start", "ابدأ", "start"].includes(normalizeText(input.text))) {
     return {
       conversation: withMessage(createInitialConversation(input.telegramUserId, input.chatId), input.messageId),
       reply: startReply,
@@ -122,7 +134,7 @@ export function buildNextStep(
       conversation: withMessage(
         {
           ...conversation,
-          state: "awaiting_description",
+          state: "awaiting_ai_confirmation",
           draft: {
             ...conversation.draft,
             latitude: input.latitude,
@@ -131,26 +143,97 @@ export function buildNextStep(
         },
         input.messageId
       ),
-      reply: "اختياري: اكتب وصفاً قصيراً للمشكلة، أو أرسل /skip لتخطي الوصف.",
+      reply: "تم استلام الموقع. سأحلل الصورة الآن وأرسل لك النتيجة للتأكيد.",
+      readyToSubmit: true,
+      action: "create_and_analyze"
+    };
+  }
+
+  if (conversation.state === "awaiting_ai_confirmation") {
+    if (input.kind !== "text") {
+      return {
+        conversation: withMessage(conversation, input.messageId),
+        reply: "هل التحليل صحيح؟ أرسل نعم للتأكيد أو لا لإضافة وصف قصير.",
+        readyToSubmit: false
+      };
+    }
+
+    if (isAffirmative(input.text)) {
+      return {
+        conversation: withMessage(
+          {
+            ...conversation,
+            state: "idle"
+          },
+          input.messageId
+        ),
+        reply: "تم تأكيد التحليل. شكراً لك.",
+        readyToSubmit: true,
+        action: "confirm_ai"
+      };
+    }
+
+    if (isNegative(input.text)) {
+      return {
+        conversation: withMessage(
+          {
+            ...conversation,
+            state: "awaiting_correction_description"
+          },
+          input.messageId
+        ),
+        reply: "اكتب وصفاً قصيراً للمشكلة، وسأعيد تحليل البلاغ بناءً عليه.",
+        readyToSubmit: false
+      };
+    }
+
+    return {
+      conversation: withMessage(conversation, input.messageId),
+      reply: "لم أفهم الرد. أرسل نعم إذا كان التحليل صحيحاً، أو لا لإضافة وصف.",
       readyToSubmit: false
     };
   }
 
-  if (conversation.state === "awaiting_description") {
-    const description =
-      input.kind === "text" && input.text.trim().toLowerCase() !== "/skip" ? input.text.trim() : null;
+  if (conversation.state === "awaiting_correction_description") {
+    if (input.kind !== "text" || input.text.trim().length < 4) {
+      return {
+        conversation: withMessage(conversation, input.messageId),
+        reply: "اكتب وصفاً أوضح للمشكلة في رسالة نصية قصيرة.",
+        readyToSubmit: false
+      };
+    }
 
     return {
       conversation: withMessage(
         {
           ...conversation,
           state: "idle",
+          draft: { ...conversation.draft, userDescription: input.text.trim() }
+        },
+        input.messageId
+      ),
+      reply: "تم استلام الوصف. سأعيد تحليل البلاغ وأرسل لك رقم التتبع.",
+      readyToSubmit: true,
+      action: "reanalyze_with_description"
+    };
+  }
+
+  if (conversation.state === "awaiting_description") {
+    const description =
+      input.kind === "text" && normalizeText(input.text) !== "/skip" ? input.text.trim() : null;
+
+    return {
+      conversation: withMessage(
+        {
+          ...conversation,
+          state: "awaiting_ai_confirmation",
           draft: { ...conversation.draft, userDescription: description }
         },
         input.messageId
       ),
       reply: "تم استلام البلاغ. سنحلل الصورة ونرسل رقم التتبع بعد قليل.",
-      readyToSubmit: true
+      readyToSubmit: true,
+      action: "create_and_analyze"
     };
   }
 

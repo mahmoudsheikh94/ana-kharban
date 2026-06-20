@@ -15,7 +15,7 @@ describe("telegram reporting flow", () => {
     expect(result.reply).toContain("الاسم الكامل");
   });
 
-  it("collects name, phone, photo, location, and description", () => {
+  it("creates and analyzes immediately after location without asking for a description", () => {
     const started = createInitialConversation("20", "10");
     const name = buildNextStep(started, {
       kind: "text",
@@ -46,23 +46,85 @@ describe("telegram reporting flow", () => {
       telegramUserId: "20",
       messageId: 5
     });
-    const description = buildNextStep(location.conversation, {
-      kind: "text",
-      text: "حفرة كبيرة في الشارع",
-      chatId: "10",
-      telegramUserId: "20",
-      messageId: 6
-    });
 
-    expect(description.readyToSubmit).toBe(true);
-    expect(description.conversation.draft).toMatchObject({
+    expect(location.readyToSubmit).toBe(true);
+    expect(location.action).toBe("create_and_analyze");
+    expect(location.conversation.state).toBe("awaiting_ai_confirmation");
+    expect(location.reply).not.toContain("وصف");
+    expect(location.conversation.draft).toMatchObject({
       fullName: "ليان أبو زيد",
       phoneNumber: "+962790000101",
       photoFileId: "photo-file",
       latitude: 31.9539,
-      longitude: 35.9106,
-      userDescription: "حفرة كبيرة في الشارع"
+      longitude: 35.9106
     });
+  });
+
+  it("confirms AI analysis and clears the reporting flow", () => {
+    const result = buildNextStep(
+      {
+        telegramUserId: "20",
+        chatId: "10",
+        state: "awaiting_ai_confirmation",
+        draft: { reportId: "report-1" }
+      },
+      {
+        kind: "text",
+        text: "نعم",
+        chatId: "10",
+        telegramUserId: "20",
+        messageId: 8
+      }
+    );
+
+    expect(result.action).toBe("confirm_ai");
+    expect(result.conversation.state).toBe("idle");
+    expect(result.conversation.draft.reportId).toBe("report-1");
+  });
+
+  it("asks for a correction description when the citizen rejects AI analysis", () => {
+    const result = buildNextStep(
+      {
+        telegramUserId: "20",
+        chatId: "10",
+        state: "awaiting_ai_confirmation",
+        draft: { reportId: "report-1" }
+      },
+      {
+        kind: "text",
+        text: "لا",
+        chatId: "10",
+        telegramUserId: "20",
+        messageId: 8
+      }
+    );
+
+    expect(result.readyToSubmit).toBe(false);
+    expect(result.conversation.state).toBe("awaiting_correction_description");
+    expect(result.reply).toContain("اكتب");
+  });
+
+  it("re-analyzes with a citizen correction description", () => {
+    const result = buildNextStep(
+      {
+        telegramUserId: "20",
+        chatId: "10",
+        state: "awaiting_correction_description",
+        draft: { reportId: "report-1" }
+      },
+      {
+        kind: "text",
+        text: "المشكلة غطاء منهل مفتوح وليس حفرة",
+        chatId: "10",
+        telegramUserId: "20",
+        messageId: 9
+      }
+    );
+
+    expect(result.readyToSubmit).toBe(true);
+    expect(result.action).toBe("reanalyze_with_description");
+    expect(result.conversation.state).toBe("idle");
+    expect(result.conversation.draft.userDescription).toBe("المشكلة غطاء منهل مفتوح وليس حفرة");
   });
 
   it("rejects an invalid phone number without advancing state", () => {

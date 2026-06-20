@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit --incremental false",
     "test": "vitest",
     "verify": "npm run lint && npm run typecheck && npm test -- --run && npm run build",
+    "e2e:prod": "node scripts/e2e-production-smoke.mjs",
     "telegram:generate-secret": "node scripts/generate-webhook-secret.mjs",
     "telegram:get-me": "node scripts/get-telegram-me.mjs",
     "telegram:set-webhook": "node scripts/set-telegram-webhook.mjs"

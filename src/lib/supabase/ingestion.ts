@@ -232,6 +232,55 @@ export async function updateReportWithAiAnalysis(reportId: string, analysis: AiR
   });
 }
 
+export async function attachTelegramReportToConversation({
+  telegramUserId,
+  reportId
+}: {
+  telegramUserId: string;
+  reportId: string;
+}) {
+  const conversation = await getTelegramConversation(telegramUserId);
+
+  if (!conversation) {
+    return;
+  }
+
+  await upsertTelegramConversation({
+    ...conversation,
+    draft: {
+      ...conversation.draft,
+      reportId
+    }
+  });
+}
+
+export async function updateReportCitizenDescription({
+  reportId,
+  userDescription
+}: {
+  reportId: string;
+  userDescription: string;
+}) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase
+    .from("reports")
+    .update({
+      user_description: userDescription
+    })
+    .eq("id", reportId);
+
+  if (error) {
+    throw new Error(`Failed to update citizen report description: ${error.message}`);
+  }
+
+  await addReportStatusHistory({
+    reportId,
+    actor: "telegram_bot",
+    event: "citizen_description_added",
+    note: userDescription
+  });
+}
+
 export async function updateReportManualStatus({
   reportId,
   validationStatus,

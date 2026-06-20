@@ -1,11 +1,14 @@
 import { analyzeReportWithGemini } from "@/lib/ai/gemini";
 import { inferJordanArea } from "@/lib/geo/jordan";
 import {
+  addReportStatusHistory,
+  attachTelegramReportToConversation,
   clearTelegramConversation,
   createTelegramReport,
   enforceTelegramRateLimit,
   getCitizenReportStatus,
   getTelegramConversation,
+  updateReportCitizenDescription,
   updateReportWithAiAnalysis,
   uploadReportImage,
   upsertTelegramConversation
@@ -18,6 +21,131 @@ import { formatDateAr, publicStatusMeta, severityMeta, validationStatusMeta } fr
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+
+type CompleteTelegramDraft = {
+  fullName: string;
+  phoneNumber: string;
+  photoFileId: string;
+  latitude: number;
+  longitude: number;
+  userDescription?: string | null;
+  reportId?: string;
+};
+
+function toCompleteDraft(draft: ReturnType<typeof buildNextStep>["conversation"]["draft"]): CompleteTelegramDraft | null {
+  if (!isCompleteDraft(draft)) {
+    return null;
+  }
+
+  return {
+    fullName: draft.fullName!,
+    phoneNumber: draft.phoneNumber!,
+    photoFileId: draft.photoFileId!,
+    latitude: draft.latitude!,
+    longitude: draft.longitude!,
+    userDescription: draft.userDescription,
+    reportId: draft.reportId
+  };
+}
+
+function formatAiAnalysisMessage({
+  reportId,
+  analysis,
+  askForConfirmation
+}: {
+  reportId: string;
+  analysis: Awaited<ReturnType<typeof analyzeReportWithGemini>>;
+  askForConfirmation: boolean;
+}) {
+  const lines = [
+    "حللت البلاغ كالتالي:",
+    `رقم التتبع: <code>${reportId}</code>`,
+    `التصنيف: ${analysis.category}`,
+    `الخطورة: ${severityMeta[analysis.severity]?.label ?? analysis.severity}`,
+    `النتيجة: ${validationStatusMeta[analysis.validationStatus]?.label ?? analysis.validationStatus}`,
+    `الثقة: ${Math.round(analysis.confidence * 100)}%`
+  ];
+
+  if (askForConfirmation) {
+    lines.push("", "هل التحليل صحيح؟ أرسل نعم للتأكيد، أو لا لإضافة وصف قصير.");
+  }
+
+  return lines.join("\n");
+}
+
+async function createAndAnalyzeReport({
+  telegramUserId,
+  chatId,
+  messageId,
+  draft
+}: {
+  telegramUserId: string;
+  chatId: string;
+  messageId?: number;
+  draft: CompleteTelegramDraft;
+}) {
+  const image = await downloadTelegramFile(draft.photoFileId);
+  const imageUrl = await uploadReportImage({
+    telegramUserId,
+    bytes: image.bytes,
+    contentType: image.contentType,
+    extension: image.extension
+  });
+
+  const reportId = await createTelegramReport({
+    telegramUserId,
+    chatId,
+    messageId,
+    photoFileId: draft.photoFileId,
+    imageUrl,
+    draft
+  });
+
+  const place = inferJordanArea(draft.latitude, draft.longitude);
+  const analysis = await analyzeReportWithGemini({
+    imageBytes: image.bytes,
+    mimeType: image.contentType,
+    city: place.city,
+    area: place.area,
+    latitude: draft.latitude,
+    longitude: draft.longitude,
+    userDescription: draft.userDescription ?? null
+  });
+  await updateReportWithAiAnalysis(reportId, analysis);
+  await attachTelegramReportToConversation({ telegramUserId, reportId });
+
+  return { reportId, analysis };
+}
+
+async function reanalyzeReportWithDescription({
+  reportId,
+  telegramUserId,
+  draft,
+  userDescription
+}: {
+  reportId: string;
+  telegramUserId: string;
+  draft: CompleteTelegramDraft;
+  userDescription: string;
+}) {
+  await updateReportCitizenDescription({ reportId, userDescription });
+  const image = await downloadTelegramFile(draft.photoFileId);
+  const place = inferJordanArea(draft.latitude, draft.longitude);
+  const analysis = await analyzeReportWithGemini({
+    imageBytes: image.bytes,
+    mimeType: image.contentType,
+    city: place.city,
+    area: place.area,
+    latitude: draft.latitude,
+    longitude: draft.longitude,
+    userDescription
+  });
+
+  await updateReportWithAiAnalysis(reportId, analysis);
+  await clearTelegramConversation(telegramUserId);
+
+  return analysis;
+}
 
 export async function POST(request: Request) {
   const secret = request.headers.get("x-telegram-bot-api-secret-token");
@@ -84,68 +212,70 @@ export async function POST(request: Request) {
   await upsertTelegramConversation(step.conversation);
   await sendTelegramMessage(input.chatId, step.reply);
 
-  if (!step.readyToSubmit) {
+  if (!step.action) {
     return NextResponse.json({ ok: true });
   }
 
   const draft = step.conversation.draft;
+  const completeDraft = toCompleteDraft(draft);
 
-  if (!isCompleteDraft(draft)) {
+  if (!completeDraft) {
     await sendTelegramMessage(input.chatId, "لم يكتمل البلاغ. أرسل /start للبدء من جديد.");
     return NextResponse.json({ ok: true });
   }
 
-  const completeDraft = {
-    fullName: draft.fullName,
-    phoneNumber: draft.phoneNumber,
-    photoFileId: draft.photoFileId,
-    latitude: draft.latitude,
-    longitude: draft.longitude,
-    userDescription: draft.userDescription
-  } as {
-    fullName: string;
-    phoneNumber: string;
-    photoFileId: string;
-    latitude: number;
-    longitude: number;
-    userDescription?: string | null;
-  };
-
   try {
-    const image = await downloadTelegramFile(completeDraft.photoFileId);
-    const imageUrl = await uploadReportImage({
-      telegramUserId: input.telegramUserId,
-      bytes: image.bytes,
-      contentType: image.contentType,
-      extension: image.extension
-    });
+    if (step.action === "create_and_analyze") {
+      const { reportId, analysis } = await createAndAnalyzeReport({
+        telegramUserId: input.telegramUserId,
+        chatId: input.chatId,
+        messageId: input.messageId,
+        draft: completeDraft
+      });
+      await sendTelegramMessage(
+        input.chatId,
+        formatAiAnalysisMessage({ reportId, analysis, askForConfirmation: true })
+      );
+    }
 
-    const reportId = await createTelegramReport({
-      telegramUserId: input.telegramUserId,
-      chatId: input.chatId,
-      messageId: input.messageId,
-      photoFileId: completeDraft.photoFileId,
-      imageUrl,
-      draft: completeDraft
-    });
+    if (step.action === "confirm_ai") {
+      const reportId = completeDraft.reportId;
 
-    const place = inferJordanArea(completeDraft.latitude, completeDraft.longitude);
-    const analysis = await analyzeReportWithGemini({
-      imageBytes: image.bytes,
-      mimeType: image.contentType,
-      city: place.city,
-      area: place.area,
-      latitude: completeDraft.latitude,
-      longitude: completeDraft.longitude,
-      userDescription: completeDraft.userDescription ?? null
-    });
-    await updateReportWithAiAnalysis(reportId, analysis);
-    await clearTelegramConversation(input.telegramUserId);
+      if (!reportId) {
+        await sendTelegramMessage(input.chatId, "لم أجد رقم البلاغ المرتبط بهذه المحادثة. أرسل /start لبلاغ جديد.");
+        return NextResponse.json({ ok: true });
+      }
 
-    await sendTelegramMessage(
-      input.chatId,
-      `تم تسجيل البلاغ وتحليله.\nرقم التتبع: <code>${reportId}</code>\nالتصنيف: ${analysis.category}\nالخطورة: ${analysis.severity}\nالحالة: ${analysis.validationStatus}`
-    );
+      await addReportStatusHistory({
+        reportId,
+        actor: "telegram_bot",
+        event: "citizen_ai_confirmed",
+        note: "Citizen confirmed the AI analysis in Telegram."
+      });
+      await clearTelegramConversation(input.telegramUserId);
+      await sendTelegramMessage(input.chatId, `تم تثبيت البلاغ.\nرقم التتبع: <code>${reportId}</code>`);
+    }
+
+    if (step.action === "reanalyze_with_description") {
+      const reportId = completeDraft.reportId;
+      const userDescription = completeDraft.userDescription;
+
+      if (!reportId || !userDescription) {
+        await sendTelegramMessage(input.chatId, "لم أجد البلاغ أو الوصف المرتبط بهذه المحادثة. أرسل /start لبلاغ جديد.");
+        return NextResponse.json({ ok: true });
+      }
+
+      const analysis = await reanalyzeReportWithDescription({
+        reportId,
+        telegramUserId: input.telegramUserId,
+        draft: completeDraft,
+        userDescription
+      });
+      await sendTelegramMessage(
+        input.chatId,
+        `${formatAiAnalysisMessage({ reportId, analysis, askForConfirmation: false })}\n\nتم تحديث البلاغ بناءً على وصفك.`
+      );
+    }
   } catch (error) {
     await sendTelegramMessage(
       input.chatId,

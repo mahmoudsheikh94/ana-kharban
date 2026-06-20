@@ -4,7 +4,9 @@ export type ConversationState =
   | "awaiting_phone"
   | "awaiting_photo"
   | "awaiting_location"
-  | "awaiting_description";
+  | "awaiting_description"
+  | "awaiting_ai_confirmation"
+  | "awaiting_correction_description";
 
 export type TelegramDraft = {
   fullName?: string;
@@ -13,6 +15,7 @@ export type TelegramDraft = {
   latitude?: number;
   longitude?: number;
   userDescription?: string | null;
+  reportId?: string;
 };
 
 export type TelegramConversation = {
@@ -64,4 +67,5 @@ export type FlowResult = {
   conversation: TelegramConversation;
   reply: string;
   readyToSubmit: boolean;
+  action?: "create_and_analyze" | "confirm_ai" | "reanalyze_with_description";
 };
