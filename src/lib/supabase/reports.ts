@@ -21,6 +21,13 @@ const reportSelect = `
   ai_image_analysis,
   generated_complaint_arabic,
   public_status,
+  telegram_chat_id,
+  telegram_message_id,
+  telegram_file_id,
+  source,
+  ai_reviewed_at,
+  manual_reviewed_at,
+  manual_review_note,
   created_at,
   updated_at,
   reporter:reporters (
@@ -43,7 +50,8 @@ function normalizeReport(report: RawReportWithReporter): ReportWithReporter {
     ...report,
     latitude: Number(report.latitude),
     longitude: Number(report.longitude),
-    ai_confidence: report.ai_confidence === null ? null : Number(report.ai_confidence)
+    ai_confidence: report.ai_confidence === null ? null : Number(report.ai_confidence),
+    status_history: report.status_history ?? []
   };
 }
 
@@ -102,13 +110,25 @@ export async function getReports(filters: ReportFilters = {}) {
 
 export async function getReportById(id: string) {
   const supabase = createSupabaseServerClient();
-  const { data, error } = await supabase.from("reports").select(reportSelect).eq("id", id).maybeSingle();
+  const [{ data, error }, historyResult] = await Promise.all([
+    supabase.from("reports").select(reportSelect).eq("id", id).maybeSingle(),
+    supabase.from("report_status_history").select("*").eq("report_id", id).order("created_at", { ascending: true })
+  ]);
 
   if (error) {
     throw new Error(`Failed to load report: ${error.message}`);
   }
 
-  return data ? normalizeReport(data as unknown as RawReportWithReporter) : null;
+  if (historyResult.error) {
+    throw new Error(`Failed to load report status history: ${historyResult.error.message}`);
+  }
+
+  return data
+    ? normalizeReport({
+        ...(data as unknown as RawReportWithReporter),
+        status_history: historyResult.data ?? []
+      })
+    : null;
 }
 
 export async function getApprovedMapReports() {

@@ -27,12 +27,31 @@ export type Report = {
   ai_image_analysis: string | null;
   generated_complaint_arabic: string | null;
   public_status: PublicStatus;
+  telegram_chat_id: string | null;
+  telegram_message_id: number | null;
+  telegram_file_id: string | null;
+  source: "telegram" | "seed" | "admin";
+  ai_reviewed_at: string | null;
+  manual_reviewed_at: string | null;
+  manual_review_note: string | null;
   created_at: string;
   updated_at: string;
 };
 
+export type ReportStatusHistory = {
+  id: string;
+  report_id: string;
+  actor: "telegram_bot" | "ai" | "admin" | "system";
+  event: string;
+  from_status: string | null;
+  to_status: string | null;
+  note: string | null;
+  created_at: string;
+};
+
 export type ReportWithReporter = Report & {
   reporter: Reporter | null;
+  status_history?: ReportStatusHistory[];
 };
 
 export type ReportFilters = {

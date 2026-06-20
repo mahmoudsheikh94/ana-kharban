@@ -27,3 +27,37 @@ export function getSupabaseServerKey() {
 
   return key;
 }
+
+export function getStorageBucketName() {
+  return process.env.SUPABASE_STORAGE_BUCKET || "report-images";
+}
+
+export function getTelegramBotToken() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+
+  if (!token) {
+    throw new Error("Missing TELEGRAM_BOT_TOKEN");
+  }
+
+  return token;
+}
+
+export function getTelegramWebhookSecret() {
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
+
+  if (!secret) {
+    throw new Error("Missing TELEGRAM_WEBHOOK_SECRET");
+  }
+
+  return secret;
+}
+
+export function getGeminiApiKey() {
+  const key = process.env.GEMINI_API_KEY;
+
+  if (!key) {
+    throw new Error("Missing GEMINI_API_KEY");
+  }
+
+  return key;
+}
