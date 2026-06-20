@@ -1,4 +1,5 @@
 import { ImageOff } from "lucide-react";
+import Image from "next/image";
 
 export function ReportImage({ src, alt, className = "" }: { src: string | null; alt: string; className?: string }) {
   if (!src) {
@@ -9,5 +10,9 @@ export function ReportImage({ src, alt, className = "" }: { src: string | null; 
     );
   }
 
-  return <img src={src} alt={alt} className={`rounded-md object-cover ${className}`} loading="lazy" />;
+  return (
+    <div className={`relative overflow-hidden rounded-md bg-stone-200 ${className}`}>
+      <Image src={src} alt={alt} fill sizes="(max-width: 768px) 100vw, 420px" className="object-cover" />
+    </div>
+  );
 }

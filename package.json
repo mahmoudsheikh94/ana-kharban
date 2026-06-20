@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "lint": "next lint",
-    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit --incremental false",
     "test": "vitest"
   },
   "dependencies": {
