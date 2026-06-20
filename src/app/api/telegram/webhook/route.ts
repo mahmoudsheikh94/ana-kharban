@@ -3,6 +3,7 @@ import { inferJordanArea } from "@/lib/geo/jordan";
 import {
   clearTelegramConversation,
   createTelegramReport,
+  enforceTelegramRateLimit,
   getCitizenReportStatus,
   getTelegramConversation,
   updateReportWithAiAnalysis,
@@ -28,6 +29,13 @@ export async function POST(request: Request) {
   const input = normalizeTelegramUpdate(await request.json());
 
   if (!input) {
+    return NextResponse.json({ ok: true });
+  }
+
+  const allowed = await enforceTelegramRateLimit(input.telegramUserId);
+
+  if (!allowed) {
+    await sendTelegramMessage(input.chatId, "وصل عدد كبير من الرسائل خلال وقت قصير. حاول مرة أخرى بعد 10 دقائق.");
     return NextResponse.json({ ok: true });
   }
 

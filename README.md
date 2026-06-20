@@ -162,6 +162,8 @@ Already implemented:
 
 - server-only Supabase secret key usage
 - Telegram webhook secret validation
+- Telegram webhook rate limiting per Telegram user ID
+- basic security headers from Next.js
 - RLS enabled on public tables
 - report images stored in Supabase Storage
 - no service/secret keys exposed through `NEXT_PUBLIC_`

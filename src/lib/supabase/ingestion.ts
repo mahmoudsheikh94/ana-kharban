@@ -311,3 +311,48 @@ export async function getCitizenReportStatus(reportId: string) {
       }
     | null;
 }
+
+export async function enforceTelegramRateLimit(telegramUserId: string) {
+  const supabase = createSupabaseServerClient();
+  const maxMessages = 25;
+  const windowMs = 10 * 60 * 1000;
+  const now = new Date();
+  const { data, error } = await supabase
+    .from("telegram_rate_limits")
+    .select("telegram_user_id, window_started_at, message_count")
+    .eq("telegram_user_id", telegramUserId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to check Telegram rate limit: ${error.message}`);
+  }
+
+  if (!data || now.getTime() - new Date(data.window_started_at).getTime() > windowMs) {
+    const { error: upsertError } = await supabase.from("telegram_rate_limits").upsert({
+      telegram_user_id: telegramUserId,
+      window_started_at: now.toISOString(),
+      message_count: 1
+    });
+
+    if (upsertError) {
+      throw new Error(`Failed to reset Telegram rate limit: ${upsertError.message}`);
+    }
+
+    return true;
+  }
+
+  if (data.message_count >= maxMessages) {
+    return false;
+  }
+
+  const { error: updateError } = await supabase
+    .from("telegram_rate_limits")
+    .update({ message_count: data.message_count + 1 })
+    .eq("telegram_user_id", telegramUserId);
+
+  if (updateError) {
+    throw new Error(`Failed to update Telegram rate limit: ${updateError.message}`);
+  }
+
+  return true;
+}
