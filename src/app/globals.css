@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@import "leaflet/dist/leaflet.css";
+
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 3px solid #f3c533;
+  outline-offset: 2px;
+}
+
+.leaflet-container {
+  min-height: 100%;
+  width: 100%;
+  font-family: var(--font-arabic), Tahoma, Arial, sans-serif;
+}
+
+.severity-pin {
+  border: 3px solid #fff;
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(15, 13, 11, 0.3);
+}
