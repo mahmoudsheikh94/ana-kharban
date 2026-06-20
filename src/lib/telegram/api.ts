@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getTelegramBotToken } from "@/lib/supabase/config";
+import { resolveTelegramImageMetadata } from "./file";
 
 const telegramApiBase = "https://api.telegram.org";
 
@@ -47,10 +48,16 @@ export async function downloadTelegramFile(fileId: string) {
     throw new Error(`Telegram file download failed: ${response.statusText}`);
   }
 
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const metadata = resolveTelegramImageMetadata({
+    bytes,
+    headerContentType: response.headers.get("content-type"),
+    filePath
+  });
+
   return {
-    bytes: Buffer.from(await response.arrayBuffer()),
-    contentType: response.headers.get("content-type") ?? "image/jpeg",
-    extension: filePath.split(".").pop() ?? "jpg"
+    bytes,
+    ...metadata
   };
 }
 

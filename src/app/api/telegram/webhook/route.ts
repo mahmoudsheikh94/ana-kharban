@@ -277,9 +277,18 @@ export async function POST(request: Request) {
       );
     }
   } catch (error) {
+    if (step.action === "create_and_analyze") {
+      await upsertTelegramConversation({
+        ...step.conversation,
+        state: "awaiting_location"
+      });
+    }
+
     await sendTelegramMessage(
       input.chatId,
-      "وصلت البيانات لكن تعذر حفظ البلاغ أو تحليله الآن. سنحاول لاحقاً، ويمكنك إرسال /start لبلاغ جديد إذا لزم."
+      step.action === "create_and_analyze"
+        ? "وصلت البيانات لكن تعذر حفظ البلاغ أو تحليله الآن. أعد إرسال الموقع وسأحاول مرة أخرى."
+        : "وصلت البيانات لكن تعذر حفظ البلاغ أو تحليله الآن. سنحاول لاحقاً، ويمكنك إرسال /start لبلاغ جديد إذا لزم."
     );
     console.error(error);
   }
