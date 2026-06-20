@@ -124,6 +124,12 @@ Verify the bot token:
 npm run telegram:get-me
 ```
 
+Generate a strong webhook secret and put it in `TELEGRAM_WEBHOOK_SECRET`:
+
+```bash
+npm run telegram:generate-secret
+```
+
 Set the webhook after deploying the app to a public HTTPS URL:
 
 ```bash
@@ -188,3 +194,17 @@ npm run typecheck
 npm test -- --run
 npm run build
 ```
+
+Or run the full local verification gate:
+
+```bash
+npm run verify
+```
+
+When switching between `npm run build` and local development, prefer:
+
+```bash
+npm run dev:clean
+```
+
+This avoids stale `.next` chunks from a previous build/dev process.
