@@ -33,7 +33,12 @@ export default async function ReportDetailsPage({ params }: ReportDetailsPagePro
       <div className="grid gap-6 xl:grid-cols-[420px_1fr]">
         <div className="space-y-6">
           <ReportDetailSection title="الصورة المرفوعة">
-            <ReportImage src={report.image_url} alt={report.ai_category ?? "صورة البلاغ"} className="aspect-[4/3] w-full" />
+            <ReportImage
+              src={report.image_url}
+              alt={report.ai_category ?? "صورة البلاغ"}
+              className="aspect-[4/3] w-full"
+              priority
+            />
           </ReportDetailSection>
 
           <ReportDetailSection title="حالة البلاغ">

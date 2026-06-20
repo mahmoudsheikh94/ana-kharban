@@ -1,4 +1,4 @@
-import { formatDateAr } from "@/lib/reports/format";
+import { formatDateAr, publicStatusMeta, validationStatusMeta } from "@/lib/reports/format";
 import type { ReportWithReporter } from "@/lib/reports/types";
 import { CheckCircle2, Clock3, Send } from "lucide-react";
 
@@ -10,12 +10,12 @@ export function StatusHistory({ report }: { report: ReportWithReporter }) {
       icon: Send
     },
     {
-      label: `نتيجة مراجعة الذكاء الاصطناعي: ${report.ai_validation_status}`,
+      label: `نتيجة مراجعة الذكاء الاصطناعي: ${validationStatusMeta[report.ai_validation_status].label}`,
       date: report.updated_at,
       icon: Clock3
     },
     {
-      label: `الحالة العامة الحالية: ${report.public_status}`,
+      label: `الحالة العامة الحالية: ${publicStatusMeta[report.public_status].label}`,
       date: report.updated_at,
       icon: CheckCircle2
     }

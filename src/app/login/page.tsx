@@ -32,6 +32,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         ) : null}
 
         <form action={loginAction} className="space-y-5">
+          <input type="text" name="username" value="admin" autoComplete="username" readOnly hidden />
           <label className="block space-y-2">
             <span className="text-sm font-semibold">كلمة مرور المسؤول</span>
             <input

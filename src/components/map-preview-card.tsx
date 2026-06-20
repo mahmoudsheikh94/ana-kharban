@@ -8,7 +8,7 @@ import { PublicStatusBadge } from "./status-badge";
 export function MapPreviewCard({ report }: { report: ReportWithReporter }) {
   return (
     <article className="w-72 rounded-lg border border-stone-200 bg-white p-3 text-right shadow-panel">
-      <ReportImage src={report.image_url} alt={report.ai_category ?? "صورة البلاغ"} className="h-32 w-full" />
+      <ReportImage src={report.image_url} alt={report.ai_category ?? "صورة البلاغ"} className="h-32 w-full" priority />
       <div className="mt-3 flex flex-wrap gap-2">
         <SeverityBadge severity={report.ai_severity} />
         <PublicStatusBadge status={report.public_status} />
