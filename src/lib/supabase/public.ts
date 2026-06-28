@@ -26,6 +26,7 @@ export async function getPublicApprovedReports() {
       "id, image_url, latitude, longitude, area, city, ai_category, ai_severity, ai_validation_status, public_status, created_at"
     )
     .eq("ai_validation_status", "approved")
+    .is("duplicate_of", null)
     .order("created_at", { ascending: false });
 
   if (error) {

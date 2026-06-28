@@ -1,4 +1,5 @@
 import { AppShell } from "@/components/app-shell";
+import { DuplicatePanel } from "@/components/duplicate-panel";
 import { ReportAdminActions } from "@/components/report-admin-actions";
 import { DetailGrid, DetailItem, ReportDetailSection } from "@/components/report-detail-section";
 import { ReportImage } from "@/components/report-image";
@@ -48,6 +49,11 @@ export default async function ReportDetailsPage({ params }: ReportDetailsPagePro
               <ValidationStatusBadge status={report.ai_validation_status} />
               <PublicStatusBadge status={report.public_status} />
             </div>
+            {(report.possible_duplicate_of || report.duplicate_of) && (
+              <div className="mt-4">
+                <DuplicatePanel report={report} />
+              </div>
+            )}
           </ReportDetailSection>
 
           <ReportDetailSection title="تحديث إداري">

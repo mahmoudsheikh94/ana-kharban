@@ -4,6 +4,7 @@ import { inferJordanArea } from "@/lib/geo/jordan";
 import {
   addReportStatusHistory,
   attachTelegramReportToConversation,
+  claimTelegramUpdate,
   clearTelegramConversation,
   createTelegramReport,
   enforceTelegramRateLimit,
@@ -23,19 +24,32 @@ import {
   createFixSubmission,
   getPermitForSubmission,
   getReporterByTelegramId,
+  getSoleActivePermitForTelegramUser,
+  getVolunteerPermitsByTelegramId,
   requestPermit,
-  upsertVolunteer
+  upsertVolunteer,
+  type RequestPermitResult
 } from "@/lib/supabase/permits";
+import { detectAndFlagDuplicate } from "@/lib/supabase/reports";
+import { permitStatusMeta } from "@/lib/permits/types";
 import {
   advanceFixSubmission,
+  buildCallbackData,
   isCompleteFixDraft,
   isFixSubmissionState,
+  parseCallback,
   parseVolunteerStartPayload,
   startFixSubmission,
   type FixSubmissionDraft
 } from "@/lib/telegram/volunteer-flow";
 import { getAbuseLimits, getTelegramWebhookSecret } from "@/lib/supabase/config";
-import { downloadTelegramFile, sendTelegramMessage } from "@/lib/telegram/api";
+import {
+  answerCallbackQuery,
+  downloadTelegramFile,
+  editTelegramReplyMarkup,
+  sendTelegramMessage,
+  type InlineKeyboard
+} from "@/lib/telegram/api";
 import { buildNextStep, isCompleteDraft } from "@/lib/telegram/flow";
 import { normalizeTelegramUpdate } from "@/lib/telegram/update";
 import type { NormalizedTelegramInput } from "@/lib/telegram/types";
@@ -152,6 +166,20 @@ async function createAndAnalyzeReport({
   });
   await recordAiUsageEvent({ telegramUserId, reportId, purpose: "initial_analysis" });
   await updateReportWithAiAnalysis(reportId, analysis);
+
+  // Cross-user duplicate detection: flag (don't reject) if a nearby same-category report
+  // already exists. Best-effort — never block report creation on a detection failure.
+  try {
+    await detectAndFlagDuplicate({
+      reportId,
+      latitude: draft.latitude,
+      longitude: draft.longitude,
+      aiCategory: analysis.category
+    });
+  } catch (error) {
+    console.error("Duplicate detection failed", error);
+  }
+
   await attachTelegramReportToConversation({ telegramUserId, reportId });
 
   return { reportId, analysis };
@@ -231,6 +259,9 @@ async function reanalyzeReportWithDescription({
 }
 
 async function resolveVolunteerForUser(telegramUserId: string) {
+  // A returning Telegram user is never re-asked for identity: we seed display_name/phone
+  // from their existing reporter record (the common case, since volunteers discover reports
+  // as reporters) and otherwise fall back to a default display name. upsert dedupes per id.
   const reporter = await getReporterByTelegramId(telegramUserId);
   return upsertVolunteer({
     telegramUserId,
@@ -239,90 +270,236 @@ async function resolveVolunteerForUser(telegramUserId: string) {
   });
 }
 
-// /fix <reportId> — a citizen volunteers to fix an approved report; creates a pending permit.
+const volunteerGuardMessages: Record<Extract<RequestPermitResult, { ok: false }>["reason"], string> = {
+  report_not_found: "لم أجد هذا البلاغ. قد يكون حُذف أو تغيّر رابطه.",
+  report_not_approved: "هذا البلاغ غير معتمد بعد، لا يمكن التطوع لإصلاحه الآن.",
+  report_has_live_permit: "يوجد متطوع يعمل على هذا البلاغ بالفعل. شكراً لاهتمامك — اختر بلاغاً آخر.",
+  report_already_fixed: "هذا البلاغ تم إصلاحه بالفعل. شكراً لك! تصفّح بلاغات أخرى بحاجة لمتطوعين."
+};
+
+// Core volunteer action, shared by the deep-link tap and the inline confirm button: create a
+// pending permit for `reportId` and reply WITHOUT exposing any UUID. After admin approval the
+// volunteer is pushed a button to submit the fix — they never type a command or an id.
+async function requestVolunteerPermit(args: {
+  chatId: string;
+  telegramUserId: string;
+}, reportId: string) {
+  try {
+    const volunteer = await resolveVolunteerForUser(args.telegramUserId);
+    const result = await requestPermit({ reportId, volunteerId: volunteer.id });
+
+    if (!result.ok) {
+      await sendTelegramMessage(args.chatId, volunteerGuardMessages[result.reason]);
+      return;
+    }
+
+    await sendTelegramMessage(
+      args.chatId,
+      [
+        "✅ تم تسجيل طلب تطوعك لإصلاح هذا البلاغ.",
+        "طلبك الآن قيد مراجعة المشرف. سنرسل لك زر إرسال صور الإصلاح فور الموافقة.",
+        "",
+        "لمتابعة كل طلباتك اضغط زر «حالة بلاغاتي» في أي وقت."
+      ].join("\n"),
+      { inlineKeyboard: myPermitsKeyboard() }
+    );
+  } catch (error) {
+    console.error(error);
+    await sendTelegramMessage(args.chatId, "تعذر تسجيل طلب التطوع الآن. حاول لاحقاً.");
+  }
+}
+
+// Begin the fix-submission sub-flow for an approved/active permit (from the Submit button or
+// a /submit fallback). Sets the conversation into the photo->location->description states.
+async function beginFixSubmission(args: {
+  chatId: string;
+  telegramUserId: string;
+  messageId: number;
+  permitId: string;
+}) {
+  const permit = await getPermitForSubmission(args.permitId);
+
+  if (!permit) {
+    await sendTelegramMessage(args.chatId, "لم أجد هذا التصريح. اضغط «حالة بلاغاتي» لعرض تصاريحك.", {
+      inlineKeyboard: myPermitsKeyboard()
+    });
+    return;
+  }
+
+  if (permit.status !== "approved" && permit.status !== "active") {
+    await sendTelegramMessage(
+      args.chatId,
+      "لا يمكن إرسال صور الإصلاح الآن. ننتظر موافقة المشرف على هذا التصريح.",
+      { inlineKeyboard: myPermitsKeyboard() }
+    );
+    return;
+  }
+
+  const volunteer = await resolveVolunteerForUser(args.telegramUserId);
+  const started = startFixSubmission({
+    permitId: permit.id,
+    reportId: permit.report_id,
+    volunteerId: volunteer.id
+  });
+
+  await upsertTelegramConversation({
+    telegramUserId: args.telegramUserId,
+    chatId: args.chatId,
+    state: started.state,
+    draft: { fix: started.draft },
+    lastMessageId: args.messageId
+  });
+  await sendTelegramMessage(args.chatId, started.reply);
+}
+
+// "My permits" — replaces the missing /myfixes. Lists the user's permits with status, and an
+// inline Submit button for any active permit, so a lost permit is always recoverable.
+async function sendMyPermits(args: { chatId: string; telegramUserId: string }) {
+  const permits = await getVolunteerPermitsByTelegramId(args.telegramUserId);
+
+  if (permits.length === 0) {
+    await sendTelegramMessage(
+      args.chatId,
+      "ليس لديك أي طلبات تطوع بعد. تصفّح الخريطة العامة واختر بلاغاً لإصلاحه."
+    );
+    return;
+  }
+
+  const lines = permits.map((permit) => {
+    const where = permit.city ? ` – ${permit.city}` : "";
+    const what = permit.reportCategory ?? "بلاغ";
+    return `• ${what}${where}: ${permitStatusMeta[permit.status].label}`;
+  });
+
+  // One Submit button per active permit (label disambiguated by category).
+  const active = permits.filter((permit) => permit.status === "active");
+  const keyboard: InlineKeyboard = active.map((permit) => [
+    {
+      text: `📸 أرسل صور إصلاح: ${permit.reportCategory ?? "بلاغ"}`,
+      callbackData: buildCallbackData({ type: "submit", permitId: permit.id })
+    }
+  ]);
+
+  await sendTelegramMessage(args.chatId, ["طلبات تطوعك:", ...lines].join("\n"), {
+    inlineKeyboard: keyboard.length > 0 ? keyboard : undefined
+  });
+}
+
+function myPermitsKeyboard(): InlineKeyboard {
+  return [[{ text: "📋 حالة بلاغاتي", callbackData: buildCallbackData({ type: "mypermits" }) }]];
+}
+
+// Handle an inline-button press. Always answers the callback query (clears the spinner) and,
+// where useful, strips the tapped message's buttons so the same action can't be re-fired.
+async function handleCallback(input: Extract<NormalizedTelegramInput, { kind: "callback" }>) {
+  const action = parseCallback(input.data);
+
+  // Always acknowledge, even on unknown data.
+  try {
+    await answerCallbackQuery(input.callbackQueryId);
+  } catch (error) {
+    console.error("answerCallbackQuery failed", error);
+  }
+
+  if (!action) {
+    return;
+  }
+
+  try {
+    if (action.type === "volunteer") {
+      await stripButtons(input);
+      await requestVolunteerPermit({ chatId: input.chatId, telegramUserId: input.telegramUserId }, action.reportId);
+      return;
+    }
+
+    if (action.type === "submit") {
+      await stripButtons(input);
+      await beginFixSubmission({
+        chatId: input.chatId,
+        telegramUserId: input.telegramUserId,
+        messageId: input.messageId,
+        permitId: action.permitId
+      });
+      return;
+    }
+
+    if (action.type === "mypermits") {
+      await sendMyPermits({ chatId: input.chatId, telegramUserId: input.telegramUserId });
+      return;
+    }
+
+    if (action.type === "cancel") {
+      await clearTelegramConversation(input.telegramUserId);
+      await stripButtons(input);
+      await sendTelegramMessage(input.chatId, "تم الإلغاء. يمكنك البدء من جديد من الخريطة العامة.");
+      return;
+    }
+
+    if (action.type === "skip") {
+      // Treated as the description-skip during fix submission; routed via the conversation.
+      const conversation = await getTelegramConversation(input.telegramUserId);
+      if (conversation && conversation.state === "awaiting_fix_description") {
+        await stripButtons(input);
+        await handleFixSubmissionStep(conversation, {
+          kind: "text",
+          text: "/skip",
+          chatId: input.chatId,
+          telegramUserId: input.telegramUserId,
+          messageId: input.messageId,
+          updateId: input.updateId
+        });
+      }
+      return;
+    }
+  } catch (error) {
+    console.error(error);
+    await sendTelegramMessage(input.chatId, "تعذر تنفيذ الإجراء الآن. حاول لاحقاً.");
+  }
+}
+
+// Best-effort removal of the inline keyboard from the message a button was tapped on.
+async function stripButtons(input: Extract<NormalizedTelegramInput, { kind: "callback" }>) {
+  try {
+    await editTelegramReplyMarkup(input.chatId, input.messageId);
+  } catch (error) {
+    console.error("editTelegramReplyMarkup failed", error);
+  }
+}
+
+// /fix <reportId> text fallback (deep link routes through here too). Buttons are preferred.
 async function handleVolunteerFixCommand(input: Extract<NormalizedTelegramInput, { kind: "text" }>) {
   const reportId = input.text.trim().split(/\s+/)[1];
 
   if (!reportId) {
     await sendTelegramMessage(
       input.chatId,
-      "أرسل رقم البلاغ بعد الأمر، مثال:\n/fix 00000000-0000-0000-0000-000000000000"
+      "افتح الخريطة العامة واضغط «تطوّع لإصلاح هذا البلاغ» على أي بلاغ للبدء."
     );
     return;
   }
 
-  try {
-    const volunteer = await resolveVolunteerForUser(input.telegramUserId);
-    const result = await requestPermit({ reportId, volunteerId: volunteer.id });
-
-    if (!result.ok) {
-      const messages: Record<typeof result.reason, string> = {
-        report_not_found: "لم أجد بلاغاً بهذا الرقم. تأكد من رقم البلاغ وحاول مرة أخرى.",
-        report_not_approved: "هذا البلاغ غير معتمد بعد، لا يمكن التطوع لإصلاحه الآن.",
-        report_has_live_permit: "يوجد تصريح نشط لهذا البلاغ بالفعل. اختر بلاغاً آخر."
-      };
-      await sendTelegramMessage(input.chatId, messages[result.reason]);
-      return;
-    }
-
-    await sendTelegramMessage(
-      input.chatId,
-      [
-        "تم تسجيل طلب تطوعك لإصلاح هذا البلاغ.",
-        `رقم التصريح: <code>${result.permitId}</code>`,
-        "بعد موافقة المشرف، أرسل صور الإصلاح عبر:",
-        `/submit ${result.permitId}`
-      ].join("\n")
-    );
-  } catch (error) {
-    console.error(error);
-    await sendTelegramMessage(input.chatId, "تعذر تسجيل طلب التطوع الآن. حاول لاحقاً.");
-  }
+  await requestVolunteerPermit({ chatId: input.chatId, telegramUserId: input.telegramUserId }, reportId);
 }
 
-// /submit <permitId> — starts the fix-submission sub-flow for an approved/active permit.
+// /submit [permitId] text fallback. With no id, resolves the user's sole active permit so they
+// never need to paste a UUID; ambiguous/none -> point them at the buttons.
 async function handleVolunteerSubmitCommand(input: Extract<NormalizedTelegramInput, { kind: "text" }>) {
-  const permitId = input.text.trim().split(/\s+/)[1];
-
-  if (!permitId) {
-    await sendTelegramMessage(
-      input.chatId,
-      "أرسل رقم التصريح بعد الأمر، مثال:\n/submit 00000000-0000-0000-0000-000000000000"
-    );
-    return;
-  }
+  const explicitPermitId = input.text.trim().split(/\s+/)[1];
 
   try {
-    const permit = await getPermitForSubmission(permitId);
+    const permitId = explicitPermitId ?? (await getSoleActivePermitForTelegramUser(input.telegramUserId));
 
-    if (!permit) {
-      await sendTelegramMessage(input.chatId, "لم أجد تصريحاً بهذا الرقم. تأكد من رقم التصريح.");
+    if (!permitId) {
+      await sendMyPermits({ chatId: input.chatId, telegramUserId: input.telegramUserId });
       return;
     }
 
-    if (permit.status !== "approved" && permit.status !== "active") {
-      await sendTelegramMessage(
-        input.chatId,
-        "لا يمكن تقديم إصلاح لهذا التصريح في حالته الحالية. انتظر موافقة المشرف."
-      );
-      return;
-    }
-
-    const volunteer = await resolveVolunteerForUser(input.telegramUserId);
-    const started = startFixSubmission({
-      permitId: permit.id,
-      reportId: permit.report_id,
-      volunteerId: volunteer.id
-    });
-
-    await upsertTelegramConversation({
-      telegramUserId: input.telegramUserId,
+    await beginFixSubmission({
       chatId: input.chatId,
-      state: started.state,
-      draft: { fix: started.draft },
-      lastMessageId: input.messageId
+      telegramUserId: input.telegramUserId,
+      messageId: input.messageId,
+      permitId
     });
-    await sendTelegramMessage(input.chatId, started.reply);
   } catch (error) {
     console.error(error);
     await sendTelegramMessage(input.chatId, "تعذر بدء تقديم الإصلاح الآن. حاول لاحقاً.");
@@ -347,7 +524,12 @@ async function handleFixSubmissionStep(
     state: result.state,
     draft: { fix: result.draft }
   });
-  await sendTelegramMessage(input.chatId, result.reply);
+  // When asking for the optional description, offer a skip button instead of a hidden /skip.
+  const replyKeyboard: InlineKeyboard | undefined =
+    result.state === "awaiting_fix_description"
+      ? [[{ text: "تخطّي الوصف ✓", callbackData: buildCallbackData({ type: "skip" }) }]]
+      : undefined;
+  await sendTelegramMessage(input.chatId, result.reply, replyKeyboard ? { inlineKeyboard: replyKeyboard } : undefined);
 
   if (!result.readyToSubmit) {
     return;
@@ -357,7 +539,9 @@ async function handleFixSubmissionStep(
 
   if (!isCompleteFixDraft(draft)) {
     await clearTelegramConversation(input.telegramUserId);
-    await sendTelegramMessage(input.chatId, "لم يكتمل تقديم الإصلاح. أرسل /submit مع رقم التصريح من جديد.");
+    await sendTelegramMessage(input.chatId, "لم يكتمل تقديم الإصلاح. اضغط «حالة بلاغاتي» للمحاولة من جديد.", {
+      inlineKeyboard: myPermitsKeyboard()
+    });
     return;
   }
 
@@ -388,12 +572,14 @@ async function handleFixSubmissionStep(
     await clearTelegramConversation(input.telegramUserId);
     await sendTelegramMessage(
       input.chatId,
-      `تم حفظ تقديم الإصلاح بنجاح.\nرقم التصريح: <code>${draft.permitId}</code>`
+      "🎉 تم حفظ صور الإصلاح بنجاح. سيراجعها المشرف ويعتمد نقاطك عند الاكتمال. شكراً لتطوعك!"
     );
   } catch (error) {
     console.error(error);
     await clearTelegramConversation(input.telegramUserId);
-    await sendTelegramMessage(input.chatId, "تعذر حفظ تقديم الإصلاح الآن. أرسل /submit مع رقم التصريح للمحاولة من جديد.");
+    await sendTelegramMessage(input.chatId, "تعذر حفظ صور الإصلاح الآن. اضغط «حالة بلاغاتي» للمحاولة من جديد.", {
+      inlineKeyboard: myPermitsKeyboard()
+    });
   }
 }
 
@@ -410,6 +596,20 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
+  // Idempotency gate: Telegram redelivers updates on slow/non-2xx responses, and this route
+  // does heavy work before returning. Claim the update_id first; a replay short-circuits here
+  // before any side effect, which is the root guarantee behind the other idempotency fixes.
+  const fresh = await claimTelegramUpdate(input.updateId);
+  if (!fresh) {
+    return NextResponse.json({ ok: true });
+  }
+
+  // Inline-keyboard button press: no slash commands, no UUIDs.
+  if (input.kind === "callback") {
+    await handleCallback(input);
+    return NextResponse.json({ ok: true });
+  }
+
   const allowed = await enforceTelegramRateLimit(input.telegramUserId);
 
   if (!allowed) {
@@ -423,8 +623,21 @@ export async function POST(request: Request) {
   }
 
   if (input.kind === "text" && input.text.trim().toLowerCase() === "/cancel") {
+    const current = await getTelegramConversation(input.telegramUserId);
+    const inFix = current ? isFixSubmissionState(current.state) : false;
     await clearTelegramConversation(input.telegramUserId);
-    await sendTelegramMessage(input.chatId, "تم إلغاء البلاغ الحالي. أرسل /start لبدء بلاغ جديد.");
+    await sendTelegramMessage(
+      input.chatId,
+      inFix
+        ? "تم إلغاء تقديم الإصلاح الحالي. اضغط «حالة بلاغاتي» للمتابعة لاحقاً."
+        : "تم إلغاء البلاغ الحالي. أرسل /start لبدء بلاغ جديد.",
+      inFix ? { inlineKeyboard: myPermitsKeyboard() } : undefined
+    );
+    return NextResponse.json({ ok: true });
+  }
+
+  if (input.kind === "text" && ["/mypermits", "/myfixes"].includes(input.text.trim().toLowerCase())) {
+    await sendMyPermits({ chatId: input.chatId, telegramUserId: input.telegramUserId });
     return NextResponse.json({ ok: true });
   }
 

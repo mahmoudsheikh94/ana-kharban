@@ -27,6 +27,9 @@ const reports: ReportWithReporter[] = [
     ai_reviewed_at: null,
     manual_reviewed_at: null,
     manual_review_note: null,
+    possible_duplicate_of: null,
+    duplicate_of: null,
+    dup_checked_at: null,
     created_at: "2026-06-20T08:00:00.000Z",
     updated_at: "2026-06-20T08:00:00.000Z",
     reporter: {
@@ -61,6 +64,9 @@ const reports: ReportWithReporter[] = [
     ai_reviewed_at: null,
     manual_reviewed_at: null,
     manual_review_note: null,
+    possible_duplicate_of: null,
+    duplicate_of: null,
+    dup_checked_at: null,
     created_at: "2026-06-19T08:00:00.000Z",
     updated_at: "2026-06-19T08:00:00.000Z",
     reporter: {

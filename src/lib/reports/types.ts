@@ -34,6 +34,9 @@ export type Report = {
   ai_reviewed_at: string | null;
   manual_reviewed_at: string | null;
   manual_review_note: string | null;
+  possible_duplicate_of: string | null;
+  duplicate_of: string | null;
+  dup_checked_at: string | null;
   created_at: string;
   updated_at: string;
 };

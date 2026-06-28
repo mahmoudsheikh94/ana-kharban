@@ -17,19 +17,45 @@ type TelegramMessage = {
   contact?: { phone_number: string };
 };
 
-type TelegramUpdate = {
-  message?: TelegramMessage;
+type TelegramCallbackQuery = {
+  id: string;
+  from?: { id: number | string };
+  message?: { message_id: number; chat: { id: number | string } };
+  data?: string;
 };
 
-function base(message: TelegramMessage) {
+type TelegramUpdate = {
+  update_id?: number;
+  message?: TelegramMessage;
+  callback_query?: TelegramCallbackQuery;
+};
+
+function base(message: TelegramMessage, updateId?: number) {
   return {
     chatId: String(message.chat.id),
     telegramUserId: String(message.from?.id ?? message.chat.id),
-    messageId: message.message_id
+    messageId: message.message_id,
+    updateId
   };
 }
 
 export function normalizeTelegramUpdate(update: TelegramUpdate): NormalizedTelegramInput | null {
+  const updateId = update.update_id;
+
+  // Inline-keyboard button press. Carries its own message + chat + user.
+  const callback = update.callback_query;
+  if (callback?.message && callback.data) {
+    return {
+      kind: "callback",
+      data: callback.data,
+      callbackQueryId: callback.id,
+      chatId: String(callback.message.chat.id),
+      telegramUserId: String(callback.from?.id ?? callback.message.chat.id),
+      messageId: callback.message.message_id,
+      updateId
+    };
+  }
+
   const message = update.message;
 
   if (!message) {
@@ -40,7 +66,7 @@ export function normalizeTelegramUpdate(update: TelegramUpdate): NormalizedTeleg
     return {
       kind: "text",
       text: message.text,
-      ...base(message)
+      ...base(message, updateId)
     };
   }
 
@@ -48,7 +74,7 @@ export function normalizeTelegramUpdate(update: TelegramUpdate): NormalizedTeleg
     return {
       kind: "contact",
       phoneNumber: message.contact.phone_number,
-      ...base(message)
+      ...base(message, updateId)
     };
   }
 
@@ -62,7 +88,7 @@ export function normalizeTelegramUpdate(update: TelegramUpdate): NormalizedTeleg
     return {
       kind: "photo",
       fileId: photo.file_id,
-      ...base(message)
+      ...base(message, updateId)
     };
   }
 
@@ -71,7 +97,7 @@ export function normalizeTelegramUpdate(update: TelegramUpdate): NormalizedTeleg
       kind: "location",
       latitude: message.location.latitude,
       longitude: message.location.longitude,
-      ...base(message)
+      ...base(message, updateId)
     };
   }
 

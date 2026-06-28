@@ -3,6 +3,8 @@ import "server-only";
 import { addReportStatusHistory, updateReportManualStatus } from "./ingestion";
 import { createSupabaseServerClient } from "./server";
 import { assertTransition } from "@/lib/permits/transitions";
+import { sendTelegramMessage } from "@/lib/telegram/api";
+import { buildCallbackData } from "@/lib/telegram/volunteer-flow";
 import { scoreFix } from "@/lib/rewards/scoring";
 import type {
   FixSubmission,
@@ -112,7 +114,14 @@ export async function getReporterByTelegramId(telegramUserId: string) {
 
 export type RequestPermitResult =
   | { ok: true; permitId: string }
-  | { ok: false; reason: "report_not_found" | "report_not_approved" | "report_has_live_permit" };
+  | {
+      ok: false;
+      reason:
+        | "report_not_found"
+        | "report_not_approved"
+        | "report_has_live_permit"
+        | "report_already_fixed";
+    };
 
 // Create a pending permit for an approved report. Guards against unapproved reports and
 // reports that already have a live permit (enforced both here and by a DB unique index).
@@ -127,7 +136,7 @@ export async function requestPermit({
 
   const { data: report, error: reportError } = await supabase
     .from("reports")
-    .select("id, ai_validation_status")
+    .select("id, ai_validation_status, public_status")
     .eq("id", reportId)
     .maybeSingle();
 
@@ -141,6 +150,13 @@ export async function requestPermit({
 
   if (report.ai_validation_status !== "approved") {
     return { ok: false, reason: "report_not_approved" };
+  }
+
+  // Already fixed: don't let a resolved report be re-volunteered (would clutter the list
+  // and allow point-farming). A rejected/cancelled *permit* is still re-volunteerable —
+  // the live-permit unique index handles that; this only blocks fixed reports.
+  if (report.public_status === "fixed") {
+    return { ok: false, reason: "report_already_fixed" };
   }
 
   const { data: existing, error: existingError } = await supabase
@@ -265,10 +281,69 @@ export async function transitionPermit({
   if (error) {
     throw new Error(`Failed to transition permit: ${error.message}`);
   }
+
+  // On activation, push the volunteer a button to submit fix photos — no command, no UUID.
+  if (to === "active") {
+    await notifyVolunteerPermitActive(permitId);
+  }
 }
 
-// Complete a permit: award points, mark the report fixed, bump volunteer counters, and
-// write a ledger entry. Idempotent — completing an already-completed permit is a no-op.
+// Push the volunteer a "send fix photos" button the moment their permit goes active. In a
+// private chat the Telegram chat_id equals the user id, so we DM telegram_user_id directly.
+// Best-effort: a delivery failure must not break the admin's activation.
+async function notifyVolunteerPermitActive(permitId: string) {
+  try {
+    const supabase = createSupabaseServerClient();
+    const { data, error } = await supabase
+      .from("permits")
+      .select("id, volunteer:volunteers (telegram_user_id), report:reports (ai_category)")
+      .eq("id", permitId)
+      .maybeSingle();
+
+    if (error || !data) {
+      return;
+    }
+
+    const row = data as unknown as {
+      id: string;
+      volunteer: { telegram_user_id: string | null } | null;
+      report: { ai_category: string | null } | null;
+    };
+    const telegramUserId = row.volunteer?.telegram_user_id;
+    if (!telegramUserId) {
+      return;
+    }
+
+    const category = row.report?.ai_category ?? "البلاغ";
+    await sendTelegramMessage(
+      telegramUserId,
+      [
+        "✅ تمت الموافقة على تطوعك!",
+        `يمكنك الآن إرسال صور إصلاح: ${category}.`,
+        "اضغط الزر أدناه للبدء."
+      ].join("\n"),
+      {
+        inlineKeyboard: [
+          [{ text: "📸 أرسل صور الإصلاح", callbackData: buildCallbackData({ type: "submit", permitId }) }]
+        ]
+      }
+    );
+  } catch (error) {
+    console.error("Failed to notify volunteer of permit activation", error);
+  }
+}
+
+// Complete a permit: award points, mark the report fixed, bump volunteer counters, and write
+// a ledger entry. Idempotent, race-safe, AND crash-safe — a double-click, webhook replay, or
+// a retry after a mid-completion failure can never double-award or leave the volunteer's
+// counters short. The guards:
+//   1. An atomic conditional status flip (UPDATE ... WHERE status = expected). Only one
+//      concurrent caller wins; the others see 0 rows. A retry after the flip already happened
+//      observes status='completed' and takes the self-heal path instead of bailing.
+//   2. award_fix_points() inserts the ledger row AND bumps the counters in ONE transaction,
+//      keyed on a unique permit_id (ON CONFLICT DO NOTHING). Running it twice is a no-op;
+//      running it after a crash that committed the flip but not the award repairs the counter.
+//   3. The report-fixed step is an idempotent status write, safe to re-run.
 export async function completePermit({
   permitId,
   note
@@ -282,54 +357,60 @@ export async function completePermit({
     throw new Error("Permit not found");
   }
 
-  if (permit.status === "completed") {
-    return; // idempotent: already awarded
-  }
-
-  assertTransition(permit.status, "completed");
-
   const supabase = createSupabaseServerClient();
-  const points = scoreFix(permit.report?.ai_severity ?? null, permit.report?.ai_category ?? null);
+  const points =
+    permit.status === "completed"
+      ? permit.points_awarded
+      : scoreFix(permit.report?.ai_severity ?? null, permit.report?.ai_category ?? null);
 
-  const { error: permitError } = await supabase
-    .from("permits")
-    .update({
-      status: "completed",
-      points_awarded: points,
-      completed_at: new Date().toISOString(),
-      ...(typeof note === "string" || note === null ? { admin_note: note } : {})
-    })
-    .eq("id", permitId);
+  // (1) Move the permit to completed unless it already is. Concurrent callers race on the
+  // conditional flip; the loser updates 0 rows and stops. An already-completed permit skips
+  // the flip and falls through to the idempotent award/heal steps below.
+  if (permit.status !== "completed") {
+    assertTransition(permit.status, "completed");
 
-  if (permitError) {
-    throw new Error(`Failed to complete permit: ${permitError.message}`);
+    const { data: flipped, error: permitError } = await supabase
+      .from("permits")
+      .update({
+        status: "completed",
+        points_awarded: points,
+        completed_at: new Date().toISOString(),
+        ...(typeof note === "string" || note === null ? { admin_note: note } : {})
+      })
+      .eq("id", permitId)
+      .eq("status", permit.status)
+      .select("id");
+
+    if (permitError) {
+      throw new Error(`Failed to complete permit: ${permitError.message}`);
+    }
+
+    if (!flipped || flipped.length === 0) {
+      return; // lost the race; the winner runs the award/heal steps
+    }
   }
 
-  // Bump denormalized volunteer counters.
-  const { error: counterError } = await supabase
-    .from("volunteers")
-    .update({
-      total_points: (permit.volunteer?.total_points ?? 0) + points,
-      completed_fixes: (permit.volunteer?.completed_fixes ?? 0) + 1
-    })
-    .eq("id", permit.volunteer_id);
-
-  if (counterError) {
-    throw new Error(`Failed to update volunteer counters: ${counterError.message}`);
-  }
-
-  const { error: ledgerError } = await supabase.from("points_ledger").insert({
-    volunteer_id: permit.volunteer_id,
-    permit_id: permitId,
-    points,
-    reason: `Completed fix for report ${permit.report_id}`
+  // (2) Atomic award (ledger + counters together). Returns true when it actually awarded,
+  // false when this permit was already awarded (a no-op replay).
+  const { data: awarded, error: awardError } = await supabase.rpc("award_fix_points", {
+    p_volunteer_id: permit.volunteer_id,
+    p_permit_id: permitId,
+    p_points: points,
+    p_reason: `Completed fix for report ${permit.report_id}`
   });
 
-  if (ledgerError) {
-    throw new Error(`Failed to write points ledger: ${ledgerError.message}`);
+  if (awardError) {
+    throw new Error(`Failed to award fix points: ${awardError.message}`);
   }
 
-  // Reflect the fix on the public report status + history.
+  // Nothing newly applied (already-completed AND already-awarded): true no-op, avoid writing
+  // a duplicate "fixed" history row on repeated complete clicks.
+  if (awarded === false) {
+    return;
+  }
+
+  // (3) Reflect the fix on the public report status + history (runs on a fresh completion or
+  // when healing a prior partial one). updateReportManualStatus is idempotent on status.
   await updateReportManualStatus({
     reportId: permit.report_id,
     publicStatus: "fixed",
@@ -371,6 +452,23 @@ export async function createFixSubmission({
     .single();
 
   if (error) {
+    // unique(permit_id, image_url): a double-clicked upload or replayed Telegram update
+    // re-submitted the same proof. Return the existing row instead of creating a duplicate.
+    if (error.code === "23505") {
+      const { data: existing, error: existingError } = await supabase
+        .from("fix_submissions")
+        .select("id")
+        .eq("permit_id", permitId)
+        .eq("image_url", imageUrl)
+        .single();
+
+      if (existingError) {
+        throw new Error(`Failed to load existing fix submission: ${existingError.message}`);
+      }
+
+      return existing.id as string;
+    }
+
     throw new Error(`Failed to create fix submission: ${error.message}`);
   }
 
@@ -398,4 +496,68 @@ export async function getPermitForSubmission(permitId: string) {
   }
 
   return data as { id: string; report_id: string; status: PermitStatus } | null;
+}
+
+export type VolunteerPermitSummary = {
+  id: string;
+  status: PermitStatus;
+  reportId: string;
+  reportCategory: string | null;
+  city: string | null;
+};
+
+// All permits held by a Telegram user (most recent first), for the "my permits" button —
+// so a volunteer who lost the chat can always see status and resume an active permit.
+export async function getVolunteerPermitsByTelegramId(
+  telegramUserId: string
+): Promise<VolunteerPermitSummary[]> {
+  const supabase = createSupabaseServerClient();
+  const { data: volunteer, error: volError } = await supabase
+    .from("volunteers")
+    .select("id")
+    .eq("telegram_user_id", telegramUserId)
+    .maybeSingle();
+
+  if (volError) {
+    throw new Error(`Failed to load volunteer: ${volError.message}`);
+  }
+  if (!volunteer) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("permits")
+    .select("id, status, report_id, report:reports (ai_category, city)")
+    .eq("volunteer_id", volunteer.id)
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    throw new Error(`Failed to load volunteer permits: ${error.message}`);
+  }
+
+  return ((data ?? []) as unknown[]).map((row) => {
+    const r = row as {
+      id: string;
+      status: PermitStatus;
+      report_id: string;
+      report: { ai_category: string | null; city: string | null } | null;
+    };
+    return {
+      id: r.id,
+      status: r.status,
+      reportId: r.report_id,
+      reportCategory: r.report?.ai_category ?? null,
+      city: r.report?.city ?? null
+    };
+  });
+}
+
+// Resolve a Telegram user's single active permit (for the zero-arg /submit fallback).
+// Returns null if they have none or more than one (ambiguous -> use buttons instead).
+export async function getSoleActivePermitForTelegramUser(
+  telegramUserId: string
+): Promise<string | null> {
+  const permits = await getVolunteerPermitsByTelegramId(telegramUserId);
+  const active = permits.filter((permit) => permit.status === "active");
+  return active.length === 1 ? active[0].id : null;
 }

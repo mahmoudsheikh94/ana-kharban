@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { TelegramConversation } from "../types";
 import {
   advanceFixSubmission,
+  buildCallbackData,
   isCompleteFixDraft,
   isFixSubmissionState,
+  parseCallback,
   parseVolunteerStartPayload,
   startFixSubmission
 } from "../volunteer-flow";
@@ -114,5 +116,40 @@ describe("parseVolunteerStartPayload", () => {
 
   it("returns null when the report id is not a uuid", () => {
     expect(parseVolunteerStartPayload("/start fix_not-a-uuid")).toBeNull();
+  });
+});
+
+describe("callback data scheme", () => {
+  const reportId = "11111111-2222-3333-4444-555555555555";
+  const permitId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  it("round-trips every action type", () => {
+    expect(parseCallback(buildCallbackData({ type: "volunteer", reportId }))).toEqual({
+      type: "volunteer",
+      reportId
+    });
+    expect(parseCallback(buildCallbackData({ type: "submit", permitId }))).toEqual({
+      type: "submit",
+      permitId
+    });
+    expect(parseCallback(buildCallbackData({ type: "skip" }))).toEqual({ type: "skip" });
+    expect(parseCallback(buildCallbackData({ type: "cancel" }))).toEqual({ type: "cancel" });
+    expect(parseCallback(buildCallbackData({ type: "mypermits" }))).toEqual({ type: "mypermits" });
+  });
+
+  it("keeps payloads within Telegram's 64-byte callback_data limit", () => {
+    for (const data of [
+      buildCallbackData({ type: "volunteer", reportId }),
+      buildCallbackData({ type: "submit", permitId })
+    ]) {
+      expect(Buffer.byteLength(data, "utf8")).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("rejects malformed callback data", () => {
+    expect(parseCallback("vol:not-a-uuid")).toBeNull();
+    expect(parseCallback("sub:")).toBeNull();
+    expect(parseCallback("garbage")).toBeNull();
+    expect(parseCallback("")).toBeNull();
   });
 });

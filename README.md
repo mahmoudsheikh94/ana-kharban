@@ -78,13 +78,22 @@ supabase/migrations/20260628120000_volunteer_permit_reward.sql
 supabase/migrations/20260628120500_public_transparency_rls.sql
 supabase/migrations/20260628121000_telegram_volunteer_states.sql
 supabase/migrations/20260628123000_public_transparency_hardening.sql
+supabase/migrations/20260628130000_telegram_update_dedup.sql
+supabase/migrations/20260628130500_idempotency_hardening.sql
+supabase/migrations/20260628131000_report_duplicate_detection.sql
 ```
 
-> These four migrations must be applied (`supabase db push`) before the volunteer,
+> These migrations must be applied (`supabase db push`) before the volunteer,
 > permit, reward, and public pages work. The public layer reads with the
-> publishable (anon) key, so RLS governs what is exposed: only approved reports,
-> safe volunteer columns (never phone number or Telegram ID), and fix submissions
-> whose permit is completed.
+> publishable (anon) key, so RLS governs what is exposed: only approved,
+> non-duplicate reports, safe volunteer columns (never phone number or Telegram
+> ID), and fix submissions whose permit is completed.
+>
+> The last three migrations harden idempotency and add duplicate detection:
+> a `telegram_processed_updates` table (dedupe redelivered webhook updates), a
+> unique `points_ledger(permit_id)` index + `increment_volunteer_rewards` RPC
+> (no double points), a unique `fix_submissions(permit_id, image_url)` index (no
+> duplicate proof), and `reports.possible_duplicate_of` / `duplicate_of` columns.
 
 ## Run Locally
 
@@ -149,34 +158,59 @@ The bot flow collects:
 
 If the citizen rejects the AI analysis, the bot asks for a short description, updates the existing report, re-runs Gemini with that description, and stores the corrected result.
 
-Citizen commands:
+The volunteer flow is **button-driven** (Telegram inline keyboards): citizens never
+type a command or paste a permit ID. Slash commands remain as fallbacks.
+
+Citizen commands (fallbacks; buttons are the primary path):
 
 ```text
 /start
 /cancel
 /status <report-id>
 /fix <report-id>       volunteer to fix an approved report (issues a pending permit)
-/submit <permit-id>    submit fix proof once the permit is approved or active
+/submit [permit-id]    start fix-proof submission; with no id, resolves your active permit
+/mypermits             list your permits and resume an active one (alias: /myfixes)
 ```
 
 ## Volunteer, Permit & Reward Flow
 
 1. A citizen finds an approved report on the public map (`/public/map`) and taps its
-   "تطوّع لإصلاح هذا البلاغ" deep link (which opens the bot at `?start=fix_<report-id>`),
-   or sends `/fix <report-id>` to the bot directly.
-2. The bot upserts a `volunteers` row (seeded from the citizen's existing reporter
-   name/phone) and creates a `pending` permit. Only one live permit exists per report.
+   "تطوّع لإصلاح هذا البلاغ" button (which opens the bot at `?start=fix_<report-id>`).
+   The bot shows the report and a **«نعم، أتطوّع»** confirm button — no UUID is shown.
+2. Confirming upserts a `volunteers` row (seeded from the citizen's existing reporter
+   name/phone, so a returning user is never re-asked for identity) and creates a
+   `pending` permit. Only one live permit exists per report; an already-`fixed` report
+   cannot be re-volunteered.
 3. The admin reviews the permit at `/permits/[id]` and moves it `approved` → `active`.
-4. The volunteer submits fix proof — a photo, optional GPS, and a short description —
-   via `/submit <permit-id>` in the bot, or the public `/public/submit/[permitId]` form
-   (which posts to `POST /api/fix/submit`, validated with Zod and a magic-byte MIME check).
-5. The admin reviews the proof and completes the permit. Completion is idempotent: it
-   awards points, bumps the volunteer's `total_points` / `completed_fixes`, writes a
-   `points_ledger` row, and marks the report `fixed`.
+   On activation the bot pushes the volunteer a **«📸 أرسل صور الإصلاح»** button (the
+   permit ID rides in the button's callback data — never typed).
+4. Tapping it walks photo → location → optional description (with a **«تخطّي الوصف»**
+   button). Volunteers can also use the public `/public/submit/[permitId]` form (which
+   posts to `POST /api/fix/submit`, validated with Zod and a magic-byte MIME check).
+5. The admin reviews the proof and completes the permit. Completion is **idempotent,
+   race-safe, and crash-safe** — a conditional status flip plus an `award_fix_points` RPC
+   that inserts the ledger row and bumps `total_points` / `completed_fixes` in one
+   transaction (keyed on a unique `points_ledger(permit_id)` index). Double-clicks, webhook
+   replays, and retries after a mid-completion failure can never double-award or leave the
+   counters short. It awards points and marks the report `fixed`.
+
+All Telegram webhook updates are deduped by `update_id`, so a redelivered update never
+re-runs any side effect.
 
 Scoring (`src/lib/rewards/scoring.ts`): a severity base (`low` 10, `medium` 20,
 `high` 35, `urgent` 50) scaled by a category multiplier (e.g. electrical 1.5,
 water/sewage 1.4, roads 1.3, waste 1.1). Points are frozen onto the permit at completion.
+
+## Duplicate-Report Detection
+
+To stop the same physical issue being tracked twice, every new Telegram report is checked
+at intake (after AI analysis) against existing live reports: a report within
+`DUP_RADIUS_DEG` degrees (default `0.0009` ≈ 100m) **and** sharing the same `ai_category`
+is flagged as a *possible duplicate* (`reports.possible_duplicate_of`). Nothing is
+auto-rejected — an admin sees an "احتمال تكرار" panel on the report detail page and either
+**confirms** it (links via `duplicate_of`, marks it `ignored`, and hides it from the public
+map) or **dismisses** it. The match logic is a pure, unit-tested function
+(`src/lib/reports/duplicates.ts`); the candidate query uses a bounding box + category.
 
 Verify the bot token:
 

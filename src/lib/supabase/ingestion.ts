@@ -230,6 +230,31 @@ export async function addReportStatusHistory({
   }
 }
 
+// Idempotency gate for the Telegram webhook. Records an update_id the first time it is
+// seen and returns true; a redelivered update (same update_id) hits the primary-key
+// conflict and returns false so the caller can short-circuit before doing any work.
+// Updates without an update_id (shouldn't happen in practice) are always allowed through.
+export async function claimTelegramUpdate(updateId: number | undefined): Promise<boolean> {
+  if (typeof updateId !== "number") {
+    return true;
+  }
+
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase
+    .from("telegram_processed_updates")
+    .insert({ update_id: updateId });
+
+  if (!error) {
+    return true;
+  }
+
+  if (error.code === "23505") {
+    return false; // already processed
+  }
+
+  throw new Error(`Failed to claim Telegram update: ${error.message}`);
+}
+
 export async function updateReportWithAiAnalysis(reportId: string, analysis: AiReportAnalysis) {
   const supabase = createSupabaseServerClient();
   const { data: current, error: currentError } = await supabase

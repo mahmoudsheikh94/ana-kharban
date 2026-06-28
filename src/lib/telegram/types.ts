@@ -47,6 +47,7 @@ export type NormalizedTelegramInput =
       chatId: string;
       telegramUserId: string;
       messageId: number;
+      updateId?: number;
     }
   | {
       kind: "photo";
@@ -54,6 +55,7 @@ export type NormalizedTelegramInput =
       chatId: string;
       telegramUserId: string;
       messageId: number;
+      updateId?: number;
     }
   | {
       kind: "location";
@@ -62,6 +64,7 @@ export type NormalizedTelegramInput =
       chatId: string;
       telegramUserId: string;
       messageId: number;
+      updateId?: number;
     }
   | {
       kind: "contact";
@@ -69,12 +72,26 @@ export type NormalizedTelegramInput =
       chatId: string;
       telegramUserId: string;
       messageId: number;
+      updateId?: number;
+    }
+  | {
+      // An inline-keyboard button press (Telegram callback_query). `data` is the button's
+      // callback_data payload (<= 64 bytes); `callbackQueryId` must be answered to clear
+      // the client's loading spinner.
+      kind: "callback";
+      data: string;
+      callbackQueryId: string;
+      chatId: string;
+      telegramUserId: string;
+      messageId: number;
+      updateId?: number;
     }
   | {
       kind: "unsupported";
       chatId: string;
       telegramUserId: string;
       messageId: number;
+      updateId?: number;
     };
 
 export type FlowResult = {

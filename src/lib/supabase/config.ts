@@ -89,3 +89,14 @@ export function getAbuseLimits() {
     maxImageBytes: readPositiveIntegerEnv("TELEGRAM_MAX_IMAGE_BYTES", 6 * 1024 * 1024)
   };
 }
+
+// Bounding-box half-width (in degrees) for cross-user duplicate-report detection. The
+// default 0.0009 deg is roughly 100m at Jordan's latitude. Tunable via DUP_RADIUS_DEG.
+export function getDuplicateRadiusDeg(): number {
+  const raw = process.env.DUP_RADIUS_DEG;
+  if (!raw) {
+    return 0.0009;
+  }
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : 0.0009;
+}

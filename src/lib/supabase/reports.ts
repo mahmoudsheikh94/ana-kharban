@@ -1,7 +1,10 @@
 import "server-only";
 
 import { calculateDashboardMetrics } from "@/lib/reports/metrics";
+import { pickCanonicalDuplicate, type DuplicateCandidate } from "@/lib/reports/duplicates";
 import type { Report, ReportFilters, ReportWithReporter } from "@/lib/reports/types";
+import { getDuplicateRadiusDeg } from "./config";
+import { addReportStatusHistory, updateReportManualStatus } from "./ingestion";
 import { createSupabaseServerClient } from "./server";
 
 const reportSelect = `
@@ -28,6 +31,9 @@ const reportSelect = `
   ai_reviewed_at,
   manual_reviewed_at,
   manual_review_note,
+  possible_duplicate_of,
+  duplicate_of,
+  dup_checked_at,
   created_at,
   updated_at,
   reporter:reporters (
@@ -163,4 +169,128 @@ export async function getReportFilterOptions() {
     cities: [...new Set(rows.map((row) => row.city).filter(Boolean))] as string[],
     areas: [...new Set(rows.map((row) => row.area).filter(Boolean))] as string[]
   };
+}
+
+// Cross-user duplicate detection. Finds an existing live report close to (lat,lng) with the
+// same ai_category and, on a hit, records it as a possible duplicate on the new report.
+// Returns the canonical (oldest) original's id, or null when none. Run at intake, after AI
+// analysis. Pre-filters candidates with a bounding box + category in SQL, then applies the
+// exact predicate in pure code (lib/reports/duplicates.ts).
+export async function detectAndFlagDuplicate({
+  reportId,
+  latitude,
+  longitude,
+  aiCategory
+}: {
+  reportId: string;
+  latitude: number;
+  longitude: number;
+  aiCategory: string | null;
+}): Promise<string | null> {
+  const supabase = createSupabaseServerClient();
+  const radius = getDuplicateRadiusDeg();
+
+  // No category -> nothing to match on. Still stamp dup_checked_at so we know it ran.
+  if (!aiCategory || !aiCategory.trim()) {
+    await supabase.from("reports").update({ dup_checked_at: new Date().toISOString() }).eq("id", reportId);
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from("reports")
+    .select("id, latitude, longitude, ai_category, created_at")
+    .eq("ai_category", aiCategory)
+    .in("ai_validation_status", ["approved", "pending"])
+    .is("duplicate_of", null)
+    .neq("id", reportId)
+    .gte("latitude", latitude - radius)
+    .lte("latitude", latitude + radius)
+    .gte("longitude", longitude - radius)
+    .lte("longitude", longitude + radius);
+
+  if (error) {
+    throw new Error(`Failed to query duplicate candidates: ${error.message}`);
+  }
+
+  const candidates: DuplicateCandidate[] = (data ?? []).map((row) => ({
+    id: row.id as string,
+    latitude: Number(row.latitude),
+    longitude: Number(row.longitude),
+    ai_category: row.ai_category as string | null,
+    created_at: row.created_at as string
+  }));
+
+  const canonicalId = pickCanonicalDuplicate(
+    { reportId, latitude, longitude, aiCategory, radiusDeg: radius },
+    candidates
+  );
+
+  const { error: updateError } = await supabase
+    .from("reports")
+    .update({
+      possible_duplicate_of: canonicalId,
+      dup_checked_at: new Date().toISOString()
+    })
+    .eq("id", reportId);
+
+  if (updateError) {
+    throw new Error(`Failed to flag possible duplicate: ${updateError.message}`);
+  }
+
+  if (canonicalId) {
+    await addReportStatusHistory({
+      reportId,
+      actor: "system",
+      event: "possible_duplicate_detected",
+      note: `Possible duplicate of report ${canonicalId} (within ${radius} deg, same category).`
+    });
+  }
+
+  return canonicalId;
+}
+
+// Admin confirms a report IS a duplicate: link it to the original and mark it ignored so it
+// drops off the public layer (anon RLS requires duplicate_of is null).
+export async function confirmReportDuplicate({
+  reportId,
+  originalId
+}: {
+  reportId: string;
+  originalId: string;
+}) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase
+    .from("reports")
+    .update({ duplicate_of: originalId, possible_duplicate_of: null })
+    .eq("id", reportId);
+
+  if (error) {
+    throw new Error(`Failed to confirm duplicate: ${error.message}`);
+  }
+
+  await updateReportManualStatus({
+    reportId,
+    publicStatus: "ignored",
+    note: `Confirmed duplicate of report ${originalId}.`
+  });
+}
+
+// Admin clears the duplicate suggestion: the report is a distinct issue after all.
+export async function clearReportDuplicate({ reportId }: { reportId: string }) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase
+    .from("reports")
+    .update({ possible_duplicate_of: null, duplicate_of: null })
+    .eq("id", reportId);
+
+  if (error) {
+    throw new Error(`Failed to clear duplicate flag: ${error.message}`);
+  }
+
+  await addReportStatusHistory({
+    reportId,
+    actor: "admin",
+    event: "duplicate_cleared",
+    note: "Admin marked this report as not a duplicate."
+  });
 }

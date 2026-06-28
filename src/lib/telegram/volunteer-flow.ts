@@ -116,6 +116,55 @@ export function parseVolunteerStartPayload(text: string): string | null {
   return match ? match[1] : null;
 }
 
+// Inline-button callback_data scheme. Kept short so payloads stay well under Telegram's
+// 64-byte callback_data limit ("vol:" + a 36-char UUID = 40 bytes). Buttons replace the
+// slash-command + paste-the-UUID UX entirely.
+export type CallbackAction =
+  | { type: "volunteer"; reportId: string } // confirm volunteering for a report
+  | { type: "submit"; permitId: string } // begin fix submission for a permit
+  | { type: "skip" } // skip the optional fix description
+  | { type: "cancel" } // cancel the current volunteer/fix flow
+  | { type: "mypermits" }; // list the user's permits
+
+const UUID_RE = /^[0-9a-fA-F-]{36}$/;
+
+export function buildCallbackData(action: CallbackAction): string {
+  switch (action.type) {
+    case "volunteer":
+      return `vol:${action.reportId}`;
+    case "submit":
+      return `sub:${action.permitId}`;
+    case "skip":
+      return "skip";
+    case "cancel":
+      return "can";
+    case "mypermits":
+      return "mine";
+  }
+}
+
+export function parseCallback(data: string): CallbackAction | null {
+  const trimmed = data.trim();
+  if (trimmed === "skip") {
+    return { type: "skip" };
+  }
+  if (trimmed === "can") {
+    return { type: "cancel" };
+  }
+  if (trimmed === "mine") {
+    return { type: "mypermits" };
+  }
+  if (trimmed.startsWith("vol:")) {
+    const reportId = trimmed.slice(4);
+    return UUID_RE.test(reportId) ? { type: "volunteer", reportId } : null;
+  }
+  if (trimmed.startsWith("sub:")) {
+    const permitId = trimmed.slice(4);
+    return UUID_RE.test(permitId) ? { type: "submit", permitId } : null;
+  }
+  return null;
+}
+
 export function isFixSubmissionState(state: ConversationState): boolean {
   return (
     state === "awaiting_fix_photo" ||
