@@ -1,11 +1,12 @@
 import { logoutAction } from "@/app/login/actions";
-import { BarChart3, LogOut, Map, ShieldAlert, Table2 } from "lucide-react";
+import { BarChart3, ClipboardList, LogOut, Map, ShieldAlert, Table2 } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
 const navItems = [
   { href: "/dashboard", label: "الرئيسية", icon: BarChart3 },
   { href: "/reports", label: "البلاغات", icon: Table2 },
+  { href: "/permits", label: "التصاريح", icon: ClipboardList },
   { href: "/map", label: "الخريطة", icon: Map },
   { href: "/abuse", label: "الحماية", icon: ShieldAlert }
 ];

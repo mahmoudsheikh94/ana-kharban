@@ -52,6 +52,13 @@ export function getTelegramWebhookSecret() {
   return secret;
 }
 
+// Optional: powers the public map's "volunteer to fix" Telegram deep link. Returns null
+// when unset so the CTA is simply hidden rather than crashing the public page.
+export function getTelegramBotUsername(): string | null {
+  const username = process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "");
+  return username ? username : null;
+}
+
 export function getGeminiApiKey() {
   const key = process.env.GEMINI_API_KEY;
 

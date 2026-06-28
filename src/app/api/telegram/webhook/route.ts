@@ -15,13 +15,30 @@ import {
   recordTelegramAbuseEvent,
   updateReportCitizenDescription,
   updateReportWithAiAnalysis,
+  uploadFixImage,
   uploadReportImage,
   upsertTelegramConversation
 } from "@/lib/supabase/ingestion";
+import {
+  createFixSubmission,
+  getPermitForSubmission,
+  getReporterByTelegramId,
+  requestPermit,
+  upsertVolunteer
+} from "@/lib/supabase/permits";
+import {
+  advanceFixSubmission,
+  isCompleteFixDraft,
+  isFixSubmissionState,
+  parseVolunteerStartPayload,
+  startFixSubmission,
+  type FixSubmissionDraft
+} from "@/lib/telegram/volunteer-flow";
 import { getAbuseLimits, getTelegramWebhookSecret } from "@/lib/supabase/config";
 import { downloadTelegramFile, sendTelegramMessage } from "@/lib/telegram/api";
 import { buildNextStep, isCompleteDraft } from "@/lib/telegram/flow";
 import { normalizeTelegramUpdate } from "@/lib/telegram/update";
+import type { NormalizedTelegramInput } from "@/lib/telegram/types";
 import { formatDateAr, publicStatusMeta, severityMeta, validationStatusMeta } from "@/lib/reports/format";
 import { NextResponse } from "next/server";
 
@@ -213,6 +230,173 @@ async function reanalyzeReportWithDescription({
   return analysis;
 }
 
+async function resolveVolunteerForUser(telegramUserId: string) {
+  const reporter = await getReporterByTelegramId(telegramUserId);
+  return upsertVolunteer({
+    telegramUserId,
+    displayName: reporter?.full_name ?? `متطوع ${telegramUserId}`,
+    phoneNumber: reporter?.phone_number ?? null
+  });
+}
+
+// /fix <reportId> — a citizen volunteers to fix an approved report; creates a pending permit.
+async function handleVolunteerFixCommand(input: Extract<NormalizedTelegramInput, { kind: "text" }>) {
+  const reportId = input.text.trim().split(/\s+/)[1];
+
+  if (!reportId) {
+    await sendTelegramMessage(
+      input.chatId,
+      "أرسل رقم البلاغ بعد الأمر، مثال:\n/fix 00000000-0000-0000-0000-000000000000"
+    );
+    return;
+  }
+
+  try {
+    const volunteer = await resolveVolunteerForUser(input.telegramUserId);
+    const result = await requestPermit({ reportId, volunteerId: volunteer.id });
+
+    if (!result.ok) {
+      const messages: Record<typeof result.reason, string> = {
+        report_not_found: "لم أجد بلاغاً بهذا الرقم. تأكد من رقم البلاغ وحاول مرة أخرى.",
+        report_not_approved: "هذا البلاغ غير معتمد بعد، لا يمكن التطوع لإصلاحه الآن.",
+        report_has_live_permit: "يوجد تصريح نشط لهذا البلاغ بالفعل. اختر بلاغاً آخر."
+      };
+      await sendTelegramMessage(input.chatId, messages[result.reason]);
+      return;
+    }
+
+    await sendTelegramMessage(
+      input.chatId,
+      [
+        "تم تسجيل طلب تطوعك لإصلاح هذا البلاغ.",
+        `رقم التصريح: <code>${result.permitId}</code>`,
+        "بعد موافقة المشرف، أرسل صور الإصلاح عبر:",
+        `/submit ${result.permitId}`
+      ].join("\n")
+    );
+  } catch (error) {
+    console.error(error);
+    await sendTelegramMessage(input.chatId, "تعذر تسجيل طلب التطوع الآن. حاول لاحقاً.");
+  }
+}
+
+// /submit <permitId> — starts the fix-submission sub-flow for an approved/active permit.
+async function handleVolunteerSubmitCommand(input: Extract<NormalizedTelegramInput, { kind: "text" }>) {
+  const permitId = input.text.trim().split(/\s+/)[1];
+
+  if (!permitId) {
+    await sendTelegramMessage(
+      input.chatId,
+      "أرسل رقم التصريح بعد الأمر، مثال:\n/submit 00000000-0000-0000-0000-000000000000"
+    );
+    return;
+  }
+
+  try {
+    const permit = await getPermitForSubmission(permitId);
+
+    if (!permit) {
+      await sendTelegramMessage(input.chatId, "لم أجد تصريحاً بهذا الرقم. تأكد من رقم التصريح.");
+      return;
+    }
+
+    if (permit.status !== "approved" && permit.status !== "active") {
+      await sendTelegramMessage(
+        input.chatId,
+        "لا يمكن تقديم إصلاح لهذا التصريح في حالته الحالية. انتظر موافقة المشرف."
+      );
+      return;
+    }
+
+    const volunteer = await resolveVolunteerForUser(input.telegramUserId);
+    const started = startFixSubmission({
+      permitId: permit.id,
+      reportId: permit.report_id,
+      volunteerId: volunteer.id
+    });
+
+    await upsertTelegramConversation({
+      telegramUserId: input.telegramUserId,
+      chatId: input.chatId,
+      state: started.state,
+      draft: { fix: started.draft },
+      lastMessageId: input.messageId
+    });
+    await sendTelegramMessage(input.chatId, started.reply);
+  } catch (error) {
+    console.error(error);
+    await sendTelegramMessage(input.chatId, "تعذر بدء تقديم الإصلاح الآن. حاول لاحقاً.");
+  }
+}
+
+// Advance the fix-submission sub-flow and persist the submission when complete.
+async function handleFixSubmissionStep(
+  conversation: Awaited<ReturnType<typeof getTelegramConversation>>,
+  input: NormalizedTelegramInput
+) {
+  if (!conversation || !conversation.draft.fix) {
+    await clearTelegramConversation(input.telegramUserId);
+    await sendTelegramMessage(input.chatId, "انتهت جلسة تقديم الإصلاح. أرسل /submit مع رقم التصريح من جديد.");
+    return;
+  }
+
+  const result = advanceFixSubmission(conversation, conversation.draft.fix as FixSubmissionDraft, input);
+
+  await upsertTelegramConversation({
+    ...conversation,
+    state: result.state,
+    draft: { fix: result.draft }
+  });
+  await sendTelegramMessage(input.chatId, result.reply);
+
+  if (!result.readyToSubmit) {
+    return;
+  }
+
+  const draft = result.draft;
+
+  if (!isCompleteFixDraft(draft)) {
+    await clearTelegramConversation(input.telegramUserId);
+    await sendTelegramMessage(input.chatId, "لم يكتمل تقديم الإصلاح. أرسل /submit مع رقم التصريح من جديد.");
+    return;
+  }
+
+  try {
+    const limits = getAbuseLimits();
+    const image = await downloadTelegramFile(draft.photoFileId!);
+    if (image.bytes.byteLength > limits.maxImageBytes) {
+      throw new Error(`Fix image exceeds maximum size: ${image.bytes.byteLength}`);
+    }
+
+    const imageUrl = await uploadFixImage({
+      permitId: draft.permitId,
+      bytes: image.bytes,
+      contentType: image.contentType,
+      extension: image.extension
+    });
+
+    await createFixSubmission({
+      permitId: draft.permitId,
+      reportId: draft.reportId,
+      imageUrl,
+      description: draft.description ?? null,
+      latitude: draft.latitude ?? null,
+      longitude: draft.longitude ?? null,
+      source: "telegram"
+    });
+
+    await clearTelegramConversation(input.telegramUserId);
+    await sendTelegramMessage(
+      input.chatId,
+      `تم حفظ تقديم الإصلاح بنجاح.\nرقم التصريح: <code>${draft.permitId}</code>`
+    );
+  } catch (error) {
+    console.error(error);
+    await clearTelegramConversation(input.telegramUserId);
+    await sendTelegramMessage(input.chatId, "تعذر حفظ تقديم الإصلاح الآن. أرسل /submit مع رقم التصريح للمحاولة من جديد.");
+  }
+}
+
 export async function POST(request: Request) {
   const secret = request.headers.get("x-telegram-bot-api-secret-token");
 
@@ -273,7 +457,35 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
+  // Web → Telegram volunteer discovery: the public map links to
+  // https://t.me/<bot>?start=fix_<reportId>, which Telegram delivers as "/start fix_<reportId>".
+  // Route it straight into the volunteer-fix command for that report.
+  if (input.kind === "text") {
+    const deepLinkReportId = parseVolunteerStartPayload(input.text);
+    if (deepLinkReportId) {
+      await handleVolunteerFixCommand({ ...input, text: `/fix ${deepLinkReportId}` });
+      return NextResponse.json({ ok: true });
+    }
+  }
+
+  if (input.kind === "text" && input.text.trim().toLowerCase().startsWith("/fix")) {
+    await handleVolunteerFixCommand(input);
+    return NextResponse.json({ ok: true });
+  }
+
+  if (input.kind === "text" && input.text.trim().toLowerCase().startsWith("/submit")) {
+    await handleVolunteerSubmitCommand(input);
+    return NextResponse.json({ ok: true });
+  }
+
   const existingConversation = await getTelegramConversation(input.telegramUserId);
+
+  // If the citizen is mid fix-submission, route to the volunteer sub-flow.
+  if (existingConversation && isFixSubmissionState(existingConversation.state)) {
+    await handleFixSubmissionStep(existingConversation, input);
+    return NextResponse.json({ ok: true });
+  }
+
   const step = buildNextStep(existingConversation, input);
 
   if (step.invalidAttempt) {

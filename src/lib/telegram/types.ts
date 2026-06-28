@@ -6,7 +6,10 @@ export type ConversationState =
   | "awaiting_location"
   | "awaiting_description"
   | "awaiting_ai_confirmation"
-  | "awaiting_correction_description";
+  | "awaiting_correction_description"
+  | "awaiting_fix_photo"
+  | "awaiting_fix_location"
+  | "awaiting_fix_description";
 
 export type TelegramDraft = {
   fullName?: string;
@@ -17,6 +20,16 @@ export type TelegramDraft = {
   userDescription?: string | null;
   reportId?: string;
   invalidAttempts?: number;
+  // Volunteer fix-submission sub-flow draft (separate from report intake).
+  fix?: {
+    permitId: string;
+    reportId: string;
+    volunteerId: string;
+    photoFileId?: string;
+    latitude?: number;
+    longitude?: number;
+    description?: string | null;
+  };
 };
 
 export type TelegramConversation = {

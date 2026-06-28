@@ -12,6 +12,12 @@ const ReportsMapClient = dynamic(() => import("./reports-map").then((module) => 
   )
 });
 
-export function ReportsMapLoader({ reports }: { reports: ReportWithReporter[] }) {
-  return <ReportsMapClient reports={reports} />;
+export function ReportsMapLoader({
+  reports,
+  volunteerBotUsername
+}: {
+  reports: ReportWithReporter[];
+  volunteerBotUsername?: string;
+}) {
+  return <ReportsMapClient reports={reports} volunteerBotUsername={volunteerBotUsername} />;
 }

@@ -35,7 +35,13 @@ function MapSelection({ report }: { report: ReportWithReporter | null }) {
   return null;
 }
 
-export function ReportsMap({ reports }: { reports: ReportWithReporter[] }) {
+export function ReportsMap({
+  reports,
+  volunteerBotUsername
+}: {
+  reports: ReportWithReporter[];
+  volunteerBotUsername?: string;
+}) {
   const [selectedReport, setSelectedReport] = useState<ReportWithReporter | null>(reports[0] ?? null);
   const center = useMemo<[number, number]>(() => {
     if (selectedReport) {
@@ -80,7 +86,9 @@ export function ReportsMap({ reports }: { reports: ReportWithReporter[] }) {
           </div>
         </section>
 
-        {selectedReport ? <MapPreviewCard report={selectedReport} /> : null}
+        {selectedReport ? (
+          <MapPreviewCard report={selectedReport} volunteerBotUsername={volunteerBotUsername} />
+        ) : null}
       </aside>
     </div>
   );

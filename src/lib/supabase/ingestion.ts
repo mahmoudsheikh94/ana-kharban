@@ -103,6 +103,32 @@ export async function uploadReportImage({
   return data.publicUrl;
 }
 
+export async function uploadFixImage({
+  permitId,
+  bytes,
+  contentType,
+  extension
+}: {
+  permitId: string;
+  bytes: Buffer;
+  contentType: string;
+  extension: string;
+}) {
+  const supabase = createSupabaseServerClient();
+  const path = `fixes/${permitId}/${Date.now()}.${extension}`;
+  const { error } = await supabase.storage.from(getStorageBucketName()).upload(path, bytes, {
+    contentType,
+    upsert: false
+  });
+
+  if (error) {
+    throw new Error(`Failed to upload fix image: ${error.message}`);
+  }
+
+  const { data } = supabase.storage.from(getStorageBucketName()).getPublicUrl(path);
+  return data.publicUrl;
+}
+
 export async function createTelegramReport({
   telegramUserId,
   chatId,

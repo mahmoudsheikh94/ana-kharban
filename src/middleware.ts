@@ -7,6 +7,7 @@ export async function middleware(request: NextRequest) {
     pathname === "/" ||
     pathname.startsWith("/dashboard") ||
     pathname.startsWith("/reports") ||
+    pathname.startsWith("/permits") ||
     pathname.startsWith("/map") ||
     pathname.startsWith("/abuse");
 
@@ -33,5 +34,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/", "/dashboard/:path*", "/reports/:path*", "/map/:path*", "/abuse/:path*"]
+  matcher: ["/", "/dashboard/:path*", "/reports/:path*", "/permits/:path*", "/map/:path*", "/abuse/:path*"]
 };

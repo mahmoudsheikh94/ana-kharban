@@ -2,6 +2,8 @@
 
 MVP admin dashboard for civic reports submitted through a Telegram bot. Citizens report public issues in Jordan with identity, phone, Telegram ID, photo, and GPS location. Gemini analyzes the report, then the citizen confirms the AI result or adds a short correction. The dashboard lets an admin inspect, filter, and visualize the reports stored in Supabase.
 
+Citizens can also **volunteer to fix** an approved report. Volunteering issues an internal **permit** (managed by the admin), the volunteer submits **fix proof** (photo + description + optional GPS) through the same bot or a public upload page, and completing a fix awards **points**. A login-free **public transparency layer** shows approved reports on a map, a volunteer leaderboard, and the submitted fixes for public accountability.
+
 ## Stack
 
 - Next.js App Router
@@ -57,14 +59,32 @@ supabase db push --password "$SUPABASE_DB_PASSWORD"
 supabase db query --linked -f supabase/seed.sql
 ```
 
-The migration creates:
+The migrations create:
 
 - `reporters`
 - `reports`
 - `report_votes`
-- `report-images` storage bucket
-- indexes and an `updated_at` trigger
-- RLS enabled on all public tables
+- `volunteers`, `permits`, `fix_submissions`, `points_ledger` (volunteer + permit + reward system)
+- `report-images` storage bucket (report photos under `telegram/...`, fix proof under `fixes/...`)
+- indexes and `updated_at` triggers
+- a partial unique index allowing only one live permit per report
+- RLS enabled on all public tables, with narrow anon (publishable-key) SELECT policies
+  for the public transparency layer
+
+Volunteer / permit / reward migrations:
+
+```bash
+supabase/migrations/20260628120000_volunteer_permit_reward.sql
+supabase/migrations/20260628120500_public_transparency_rls.sql
+supabase/migrations/20260628121000_telegram_volunteer_states.sql
+supabase/migrations/20260628123000_public_transparency_hardening.sql
+```
+
+> These four migrations must be applied (`supabase db push`) before the volunteer,
+> permit, reward, and public pages work. The public layer reads with the
+> publishable (anon) key, so RLS governs what is exposed: only approved reports,
+> safe volunteer columns (never phone number or Telegram ID), and fix submissions
+> whose permit is completed.
 
 ## Run Locally
 
@@ -83,10 +103,24 @@ Log in with `ADMIN_DASHBOARD_PASSWORD`.
 
 ## Pages
 
+Admin (cookie-protected):
+
 - `/dashboard`: summary metrics and recent reports
 - `/reports`: filterable report table
 - `/reports/[id]`: full report details
-- `/map`: approved reports on a Leaflet map
+- `/map`: approved reports on a Leaflet map (service-role read)
+- `/permits`: permit queue, filterable by status
+- `/permits/[id]`: permit detail with volunteer info, submitted fix proof, and the
+  approve / activate / complete / reject / cancel actions
+
+Public (no login, outside the auth middleware):
+
+- `/public`: public landing with platform stats
+- `/public/map`: approved reports on a Leaflet map (anon read)
+- `/public/leaderboard`: top volunteers by points
+- `/public/volunteers/[id]`: a volunteer's public profile and completed fixes
+- `/public/fixes`: gallery of completed fix submissions
+- `/public/submit/[permitId]`: login-free fix-proof upload form for a permit
 
 ## Telegram Bot
 
@@ -121,7 +155,28 @@ Citizen commands:
 /start
 /cancel
 /status <report-id>
+/fix <report-id>       volunteer to fix an approved report (issues a pending permit)
+/submit <permit-id>    submit fix proof once the permit is approved or active
 ```
+
+## Volunteer, Permit & Reward Flow
+
+1. A citizen finds an approved report on the public map (`/public/map`) and taps its
+   "تطوّع لإصلاح هذا البلاغ" deep link (which opens the bot at `?start=fix_<report-id>`),
+   or sends `/fix <report-id>` to the bot directly.
+2. The bot upserts a `volunteers` row (seeded from the citizen's existing reporter
+   name/phone) and creates a `pending` permit. Only one live permit exists per report.
+3. The admin reviews the permit at `/permits/[id]` and moves it `approved` → `active`.
+4. The volunteer submits fix proof — a photo, optional GPS, and a short description —
+   via `/submit <permit-id>` in the bot, or the public `/public/submit/[permitId]` form
+   (which posts to `POST /api/fix/submit`, validated with Zod and a magic-byte MIME check).
+5. The admin reviews the proof and completes the permit. Completion is idempotent: it
+   awards points, bumps the volunteer's `total_points` / `completed_fixes`, writes a
+   `points_ledger` row, and marks the report `fixed`.
+
+Scoring (`src/lib/rewards/scoring.ts`): a severity base (`low` 10, `medium` 20,
+`high` 35, `urgent` 50) scaled by a category multiplier (e.g. electrical 1.5,
+water/sewage 1.4, roads 1.3, waste 1.1). Points are frozen onto the permit at completion.
 
 Verify the bot token:
 
