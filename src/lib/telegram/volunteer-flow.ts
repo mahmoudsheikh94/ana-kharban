@@ -124,7 +124,9 @@ export type CallbackAction =
   | { type: "submit"; permitId: string } // begin fix submission for a permit
   | { type: "skip" } // skip the optional fix description
   | { type: "cancel" } // cancel the current volunteer/fix flow
-  | { type: "mypermits" }; // list the user's permits
+  | { type: "mypermits" } // list the user's permits
+  | { type: "confirm_identity" } // returning reporter: file using stored name/phone
+  | { type: "edit_identity" }; // returning reporter: re-enter name/phone
 
 const UUID_RE = /^[0-9a-fA-F-]{36}$/;
 
@@ -140,6 +142,10 @@ export function buildCallbackData(action: CallbackAction): string {
       return "can";
     case "mypermits":
       return "mine";
+    case "confirm_identity":
+      return "cid";
+    case "edit_identity":
+      return "eid";
   }
 }
 
@@ -153,6 +159,12 @@ export function parseCallback(data: string): CallbackAction | null {
   }
   if (trimmed === "mine") {
     return { type: "mypermits" };
+  }
+  if (trimmed === "cid") {
+    return { type: "confirm_identity" };
+  }
+  if (trimmed === "eid") {
+    return { type: "edit_identity" };
   }
   if (trimmed.startsWith("vol:")) {
     const reportId = trimmed.slice(4);

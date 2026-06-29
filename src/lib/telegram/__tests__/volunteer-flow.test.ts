@@ -135,6 +135,12 @@ describe("callback data scheme", () => {
     expect(parseCallback(buildCallbackData({ type: "skip" }))).toEqual({ type: "skip" });
     expect(parseCallback(buildCallbackData({ type: "cancel" }))).toEqual({ type: "cancel" });
     expect(parseCallback(buildCallbackData({ type: "mypermits" }))).toEqual({ type: "mypermits" });
+    expect(parseCallback(buildCallbackData({ type: "confirm_identity" }))).toEqual({
+      type: "confirm_identity"
+    });
+    expect(parseCallback(buildCallbackData({ type: "edit_identity" }))).toEqual({
+      type: "edit_identity"
+    });
   });
 
   it("keeps payloads within Telegram's 64-byte callback_data limit", () => {

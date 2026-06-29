@@ -7,6 +7,8 @@ export type ConversationState =
   | "awaiting_description"
   | "awaiting_ai_confirmation"
   | "awaiting_correction_description"
+  | "awaiting_identity_confirmation"
+  | "awaiting_volunteer_name"
   | "awaiting_fix_photo"
   | "awaiting_fix_location"
   | "awaiting_fix_description";
@@ -20,6 +22,8 @@ export type TelegramDraft = {
   userDescription?: string | null;
   reportId?: string;
   invalidAttempts?: number;
+  // Report a volunteer wants to fix, held while we ask an unnamed volunteer for a display name.
+  pendingVolunteerReportId?: string;
   // Volunteer fix-submission sub-flow draft (separate from report intake).
   fix?: {
     permitId: string;

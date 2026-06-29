@@ -2,7 +2,9 @@ import { EmptyState } from "@/components/empty-state";
 import { PublicShell } from "@/components/public-shell";
 import { ReportImage } from "@/components/report-image";
 import { SeverityBadge } from "@/components/severity-badge";
+import { TierBadge } from "@/components/tier-badge";
 import { formatDateOnly } from "@/lib/reports/format";
+import { nextTier } from "@/lib/rewards/tiers";
 import type { Severity } from "@/lib/reports/types";
 import { getPublicVolunteer, getVolunteerCompletedPermits } from "@/lib/supabase/public";
 import { Wrench } from "lucide-react";
@@ -25,8 +27,21 @@ export default async function VolunteerProfilePage({ params }: VolunteerProfileP
     notFound();
   }
 
+  const upcoming = nextTier(volunteer.total_points);
+
   return (
     <PublicShell title={volunteer.display_name} subtitle="ملف متطوع عام — إجمالي النقاط والإصلاحات المكتملة.">
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        <TierBadge points={volunteer.total_points} className="text-sm" />
+        {upcoming ? (
+          <span className="text-xs text-stone-500">
+            {upcoming.pointsToGo} نقطة للوصول إلى «{upcoming.tier.label}»
+          </span>
+        ) : (
+          <span className="text-xs font-semibold text-civic-amber">أعلى رتبة — أحسنت!</span>
+        )}
+      </div>
+
       <div className="grid gap-5 sm:grid-cols-2">
         <section className="rounded-lg border border-stone-200 bg-white p-5">
           <p className="text-sm font-semibold text-stone-500">إجمالي النقاط</p>

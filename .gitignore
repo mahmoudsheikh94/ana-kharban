@@ -8,6 +8,7 @@ dist/
 coverage/
 .turbo/
 .playwright-cli/
+.playwright-mcp/
 supabase/.temp/
 tsconfig.tsbuildinfo
 *.log

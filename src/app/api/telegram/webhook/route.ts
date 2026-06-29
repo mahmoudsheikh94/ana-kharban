@@ -21,12 +21,14 @@ import {
   upsertTelegramConversation
 } from "@/lib/supabase/ingestion";
 import {
+  checkFixProximity,
   createFixSubmission,
   getPermitForSubmission,
   getReporterByTelegramId,
   getSoleActivePermitForTelegramUser,
   getVolunteerPermitsByTelegramId,
   requestPermit,
+  setVolunteerDisplayName,
   upsertVolunteer,
   type RequestPermitResult
 } from "@/lib/supabase/permits";
@@ -50,9 +52,9 @@ import {
   sendTelegramMessage,
   type InlineKeyboard
 } from "@/lib/telegram/api";
-import { buildNextStep, isCompleteDraft } from "@/lib/telegram/flow";
+import { buildNextStep, createInitialConversation, isCompleteDraft, isPhoneNumber } from "@/lib/telegram/flow";
 import { normalizeTelegramUpdate } from "@/lib/telegram/update";
-import type { NormalizedTelegramInput } from "@/lib/telegram/types";
+import type { NormalizedTelegramInput, TelegramConversation } from "@/lib/telegram/types";
 import { formatDateAr, publicStatusMeta, severityMeta, validationStatusMeta } from "@/lib/reports/format";
 import { NextResponse } from "next/server";
 
@@ -258,16 +260,26 @@ async function reanalyzeReportWithDescription({
   return analysis;
 }
 
+// A placeholder display name we use only until a volunteer gives a real one. It is never
+// shown publicly (the public layer renders "متطوع مجهول" for it instead of the raw ID).
+function volunteerPlaceholderName(telegramUserId: string) {
+  return `متطوع ${telegramUserId}`;
+}
+
 async function resolveVolunteerForUser(telegramUserId: string) {
   // A returning Telegram user is never re-asked for identity: we seed display_name/phone
   // from their existing reporter record (the common case, since volunteers discover reports
-  // as reporters) and otherwise fall back to a default display name. upsert dedupes per id.
+  // as reporters) and otherwise fall back to a placeholder. upsert dedupes per id.
   const reporter = await getReporterByTelegramId(telegramUserId);
-  return upsertVolunteer({
+  const hasRealName = Boolean(reporter?.full_name?.trim());
+  const volunteer = await upsertVolunteer({
     telegramUserId,
-    displayName: reporter?.full_name ?? `متطوع ${telegramUserId}`,
+    displayName: reporter?.full_name?.trim() || volunteerPlaceholderName(telegramUserId),
     phoneNumber: reporter?.phone_number ?? null
   });
+  // A volunteer needs a real name if neither the reporter record nor a prior prompt gave one.
+  const needsName = !hasRealName && volunteer.display_name === volunteerPlaceholderName(telegramUserId);
+  return { volunteer, needsName };
 }
 
 const volunteerGuardMessages: Record<Extract<RequestPermitResult, { ok: false }>["reason"], string> = {
@@ -285,7 +297,25 @@ async function requestVolunteerPermit(args: {
   telegramUserId: string;
 }, reportId: string) {
   try {
-    const volunteer = await resolveVolunteerForUser(args.telegramUserId);
+    const { volunteer, needsName } = await resolveVolunteerForUser(args.telegramUserId);
+
+    // First-time volunteer with no name on file: ask for one before creating the permit, so
+    // the leaderboard shows a real name instead of a Telegram ID. We stash the report id in
+    // the conversation draft and resume in handleVolunteerNameStep once they reply.
+    if (needsName) {
+      await upsertTelegramConversation({
+        telegramUserId: args.telegramUserId,
+        chatId: args.chatId,
+        state: "awaiting_volunteer_name",
+        draft: { pendingVolunteerReportId: reportId }
+      });
+      await sendTelegramMessage(
+        args.chatId,
+        "قبل أن نسجّل تطوعك، ما الاسم الذي تريد ظهوره في لوحة شرف المتطوعين؟ أرسله في رسالة واحدة."
+      );
+      return;
+    }
+
     const result = await requestPermit({ reportId, volunteerId: volunteer.id });
 
     if (!result.ok) {
@@ -306,6 +336,54 @@ async function requestVolunteerPermit(args: {
   } catch (error) {
     console.error(error);
     await sendTelegramMessage(args.chatId, "تعذر تسجيل طلب التطوع الآن. حاول لاحقاً.");
+  }
+}
+
+// Resume after asking an unnamed volunteer for their display name: store the name, then
+// create the pending permit for the report they were trying to volunteer for.
+async function handleVolunteerNameStep(
+  conversation: Awaited<ReturnType<typeof getTelegramConversation>>,
+  input: Extract<NormalizedTelegramInput, { kind: "text" }>
+) {
+  const reportId = conversation?.draft.pendingVolunteerReportId;
+
+  if (!conversation || !reportId) {
+    await clearTelegramConversation(input.telegramUserId);
+    await sendTelegramMessage(input.chatId, "انتهت الجلسة. تصفّح الخريطة العامة واختر بلاغاً لإصلاحه من جديد.");
+    return;
+  }
+
+  const name = input.text.trim();
+  if (name.length < 2 || name.length > 60) {
+    await sendTelegramMessage(input.chatId, "أرسل اسماً صحيحاً (بين حرفين و60 حرفاً) ليظهر في لوحة الشرف.");
+    return;
+  }
+
+  try {
+    const { volunteer } = await resolveVolunteerForUser(input.telegramUserId);
+    await setVolunteerDisplayName(input.telegramUserId, name);
+    await clearTelegramConversation(input.telegramUserId);
+
+    const result = await requestPermit({ reportId, volunteerId: volunteer.id });
+    if (!result.ok) {
+      await sendTelegramMessage(input.chatId, volunteerGuardMessages[result.reason]);
+      return;
+    }
+
+    await sendTelegramMessage(
+      input.chatId,
+      [
+        `شكراً ${name}! ✅ تم تسجيل طلب تطوعك لإصلاح هذا البلاغ.`,
+        "طلبك الآن قيد مراجعة المشرف. سنرسل لك زر إرسال صور الإصلاح فور الموافقة.",
+        "",
+        "لمتابعة كل طلباتك اضغط زر «حالة بلاغاتي» في أي وقت."
+      ].join("\n"),
+      { inlineKeyboard: myPermitsKeyboard() }
+    );
+  } catch (error) {
+    console.error(error);
+    await clearTelegramConversation(input.telegramUserId);
+    await sendTelegramMessage(input.chatId, "تعذر تسجيل طلب التطوع الآن. حاول لاحقاً.");
   }
 }
 
@@ -335,7 +413,7 @@ async function beginFixSubmission(args: {
     return;
   }
 
-  const volunteer = await resolveVolunteerForUser(args.telegramUserId);
+  const { volunteer } = await resolveVolunteerForUser(args.telegramUserId);
   const started = startFixSubmission({
     permitId: permit.id,
     reportId: permit.report_id,
@@ -435,6 +513,30 @@ async function handleCallback(input: Extract<NormalizedTelegramInput, { kind: "c
       return;
     }
 
+    if (action.type === "confirm_identity") {
+      // Returning reporter confirmed their stored name/phone — skip straight to the photo
+      // step with the identity draft intact. Guard on state so a stale button can't advance
+      // an unrelated conversation.
+      const conversation = await getTelegramConversation(input.telegramUserId);
+      if (conversation && conversation.state === "awaiting_identity_confirmation") {
+        await stripButtons(input);
+        await upsertTelegramConversation({ ...conversation, state: "awaiting_photo" });
+        await sendTelegramMessage(input.chatId, "وصل الرقم. أرسل صورة واضحة للمشكلة العامة.");
+      }
+      return;
+    }
+
+    if (action.type === "edit_identity") {
+      // Returning reporter wants to update their details — reset to the first-time flow.
+      await stripButtons(input);
+      await upsertTelegramConversation(createInitialConversation(input.telegramUserId, input.chatId));
+      await sendTelegramMessage(
+        input.chatId,
+        "تمام. أرسل الاسم الكامل كما تريد ظهوره في البلاغ."
+      );
+      return;
+    }
+
     if (action.type === "skip") {
       // Treated as the description-skip during fix submission; routed via the conversation.
       const conversation = await getTelegramConversation(input.telegramUserId);
@@ -464,6 +566,39 @@ async function stripButtons(input: Extract<NormalizedTelegramInput, { kind: "cal
   } catch (error) {
     console.error("editTelegramReplyMarkup failed", error);
   }
+}
+
+function identityConfirmKeyboard(): InlineKeyboard {
+  return [
+    [{ text: "متابعة ✓", callbackData: buildCallbackData({ type: "confirm_identity" }) }],
+    [{ text: "تعديل بياناتي", callbackData: buildCallbackData({ type: "edit_identity" }) }]
+  ];
+}
+
+// Seed a returning reporter's conversation from their stored record so they skip the
+// name + phone steps. Returns null for a brand-new user, or a record whose name/phone is
+// missing or fails validation — those fall through to the normal first-time flow. The
+// reporter columns are nullable in the DB even though the type claims non-null, so we guard
+// at runtime. The seeded draft carries ONLY fullName/phoneNumber (no photo/location), so the
+// completeness check can't fire until the user actually sends a photo and location.
+async function seedReturningReporter(
+  input: Extract<NormalizedTelegramInput, { kind: "text" }>
+): Promise<TelegramConversation | null> {
+  const reporter = await getReporterByTelegramId(input.telegramUserId);
+  const fullName = reporter?.full_name?.trim();
+  const phoneNumber = reporter?.phone_number?.trim();
+
+  if (!fullName || !phoneNumber || !isPhoneNumber(phoneNumber)) {
+    return null;
+  }
+
+  return {
+    telegramUserId: input.telegramUserId,
+    chatId: input.chatId,
+    state: "awaiting_identity_confirmation",
+    draft: { fullName, phoneNumber },
+    lastMessageId: input.messageId
+  };
 }
 
 // /fix <reportId> text fallback (deep link routes through here too). Buttons are preferred.
@@ -542,6 +677,23 @@ async function handleFixSubmissionStep(
     await sendTelegramMessage(input.chatId, "لم يكتمل تقديم الإصلاح. اضغط «حالة بلاغاتي» للمحاولة من جديد.", {
       inlineKeyboard: myPermitsKeyboard()
     });
+    return;
+  }
+
+  // GPS proximity: the fix must be near the report it claims to fix. If it's too far, keep
+  // the conversation at the location step and ask for a corrected location rather than saving
+  // a mismatched proof.
+  const proximity = await checkFixProximity(draft.reportId, draft.latitude, draft.longitude);
+  if (!proximity.ok && proximity.reason === "too_far") {
+    await upsertTelegramConversation({
+      ...conversation,
+      state: "awaiting_fix_location",
+      draft: { fix: { ...draft, latitude: undefined, longitude: undefined } }
+    });
+    await sendTelegramMessage(
+      input.chatId,
+      `📍 الموقع الذي أرسلته يبعد حوالي ${Math.round(proximity.distanceMeters)} متر عن موقع البلاغ. أرسل موقعك من مكان الإصلاح نفسه.`
+    );
     return;
   }
 
@@ -691,11 +843,43 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
+  // Bare /start from a RETURNING reporter: skip the name + phone steps. The pure FSM can't
+  // know the user is returning (no DB), so we look up the stored reporter here. A known
+  // reporter with a usable name + valid phone is seeded into awaiting_identity_confirmation
+  // and asked to confirm or edit; new users / partial records fall through to the normal
+  // awaiting_full_name flow. The deep-link /start fix_<id> was already consumed above, and
+  // this matches /start by exact equality, so the volunteer link is never intercepted here.
+  if (input.kind === "text" && ["/start", "ابدأ", "start"].includes(input.text.trim().toLowerCase())) {
+    const seeded = await seedReturningReporter(input);
+    if (seeded) {
+      await upsertTelegramConversation(seeded);
+      await sendTelegramMessage(
+        input.chatId,
+        [
+          "أهلاً بعودتك. سنسجّل البلاغ بنفس بياناتك:",
+          `الاسم: ${seeded.draft.fullName}`,
+          `الهاتف: ${seeded.draft.phoneNumber}`,
+          "",
+          "اضغط «متابعة» للمتابعة، أو «تعديل بياناتي» لتغيير الاسم أو الرقم."
+        ].join("\n"),
+        { inlineKeyboard: identityConfirmKeyboard() }
+      );
+      return NextResponse.json({ ok: true });
+    }
+    // New user / partial record: fall through to the standard awaiting_full_name flow below.
+  }
+
   const existingConversation = await getTelegramConversation(input.telegramUserId);
 
   // If the citizen is mid fix-submission, route to the volunteer sub-flow.
   if (existingConversation && isFixSubmissionState(existingConversation.state)) {
     await handleFixSubmissionStep(existingConversation, input);
+    return NextResponse.json({ ok: true });
+  }
+
+  // Awaiting a first-time volunteer's display name.
+  if (existingConversation && existingConversation.state === "awaiting_volunteer_name" && input.kind === "text") {
+    await handleVolunteerNameStep(existingConversation, input);
     return NextResponse.json({ ok: true });
   }
 

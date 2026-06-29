@@ -6,6 +6,7 @@ import { assertTransition } from "@/lib/permits/transitions";
 import { sendTelegramMessage } from "@/lib/telegram/api";
 import { buildCallbackData } from "@/lib/telegram/volunteer-flow";
 import { scoreFix } from "@/lib/rewards/scoring";
+import { FIX_PROXIMITY_METERS, haversineMeters } from "@/lib/geo/distance";
 import type {
   FixSubmission,
   Permit,
@@ -94,6 +95,19 @@ export async function upsertVolunteer({
   }
 
   return data as Volunteer;
+}
+
+// Set/refresh a volunteer's public display name (used after asking an unnamed volunteer).
+export async function setVolunteerDisplayName(telegramUserId: string, displayName: string) {
+  const supabase = createSupabaseServerClient();
+  const { error } = await supabase
+    .from("volunteers")
+    .update({ display_name: displayName })
+    .eq("telegram_user_id", telegramUserId);
+
+  if (error) {
+    throw new Error(`Failed to set volunteer display name: ${error.message}`);
+  }
 }
 
 // Look up a reporter (the citizen identity) to seed the volunteer's default name/phone.
@@ -357,6 +371,13 @@ export async function completePermit({
     throw new Error("Permit not found");
   }
 
+  // Require proof: a permit can only be completed (and points awarded) if the volunteer has
+  // submitted at least one fix. Skip the check when the permit is already completed so the
+  // idempotent self-heal path still runs even if submissions were later removed.
+  if (permit.status !== "completed" && (permit.fix_submissions?.length ?? 0) === 0) {
+    throw new Error("PERMIT_NO_FIX_SUBMISSION");
+  }
+
   const supabase = createSupabaseServerClient();
   const points =
     permit.status === "completed"
@@ -496,6 +517,70 @@ export async function getPermitForSubmission(permitId: string) {
   }
 
   return data as { id: string; report_id: string; status: PermitStatus } | null;
+}
+
+export type FixProximityResult =
+  | { ok: true; distanceMeters: number }
+  | { ok: false; reason: "report_not_found" | "report_missing_location" }
+  | { ok: false; reason: "too_far"; distanceMeters: number; toleranceMeters: number };
+
+// Verify a fix's GPS is near the report it claims to fix. Catches a fix submitted from the
+// wrong place (or a different city). Missing coordinates on either side are treated as a
+// soft pass (ok:true with distance NaN) — callers decide; we never block on absent data.
+export async function checkFixProximity(
+  reportId: string,
+  fixLatitude: number | null | undefined,
+  fixLongitude: number | null | undefined,
+  toleranceMeters: number = FIX_PROXIMITY_METERS
+): Promise<FixProximityResult> {
+  if (typeof fixLatitude !== "number" || typeof fixLongitude !== "number") {
+    // No fix coordinates supplied — nothing to compare against; let the caller proceed.
+    return { ok: true, distanceMeters: Number.NaN };
+  }
+
+  const supabase = createSupabaseServerClient();
+  const { data, error } = await supabase
+    .from("reports")
+    .select("latitude, longitude")
+    .eq("id", reportId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to load report location: ${error.message}`);
+  }
+
+  if (!data) {
+    return { ok: false, reason: "report_not_found" };
+  }
+
+  const reportLat = Number(data.latitude);
+  const reportLon = Number(data.longitude);
+  if (!Number.isFinite(reportLat) || !Number.isFinite(reportLon)) {
+    return { ok: false, reason: "report_missing_location" };
+  }
+
+  const distanceMeters = haversineMeters(reportLat, reportLon, fixLatitude, fixLongitude);
+  if (distanceMeters > toleranceMeters) {
+    return { ok: false, reason: "too_far", distanceMeters, toleranceMeters };
+  }
+
+  return { ok: true, distanceMeters };
+}
+
+// How many fix submissions a permit already has — used to cap public uploads and to require
+// at least one proof before completion.
+export async function countFixSubmissions(permitId: string): Promise<number> {
+  const supabase = createSupabaseServerClient();
+  const { count, error } = await supabase
+    .from("fix_submissions")
+    .select("id", { count: "exact", head: true })
+    .eq("permit_id", permitId);
+
+  if (error) {
+    throw new Error(`Failed to count fix submissions: ${error.message}`);
+  }
+
+  return count ?? 0;
 }
 
 export type VolunteerPermitSummary = {

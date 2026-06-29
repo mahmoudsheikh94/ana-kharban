@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildNextStep, createInitialConversation } from "../flow";
+import { buildNextStep, createInitialConversation, isPhoneNumber } from "../flow";
+import type { TelegramConversation } from "../types";
 
 describe("telegram reporting flow", () => {
-  it("starts a reporting conversation from /start", () => {
+  it("starts a NEW-user reporting conversation from /start (pure FSM has no DB)", () => {
+    // The pure FSM always resets a bare /start to awaiting_full_name; the returning-reporter
+    // skip lives in the webhook layer, not here.
     const result = buildNextStep(null, {
       kind: "text",
       text: "/start",
@@ -13,6 +16,39 @@ describe("telegram reporting flow", () => {
 
     expect(result.conversation.state).toBe("awaiting_full_name");
     expect(result.reply).toContain("الاسم الكامل");
+  });
+
+  it("re-prompts (without lockout) when a returning reporter types at the confirm step", () => {
+    const seeded: TelegramConversation = {
+      telegramUserId: "20",
+      chatId: "10",
+      state: "awaiting_identity_confirmation",
+      draft: { fullName: "محمود", phoneNumber: "+962790000000" }
+    };
+
+    const result = buildNextStep(seeded, {
+      kind: "text",
+      text: "مرحبا",
+      chatId: "10",
+      telegramUserId: "20",
+      messageId: 2
+    });
+
+    // Must NOT flag an invalid attempt (would feed the abuse-lockout counter) and must NOT
+    // capture the text as a name — the seeded identity draft is preserved.
+    expect(result.invalidAttempt).toBeUndefined();
+    expect(result.conversation.state).toBe("awaiting_identity_confirmation");
+    expect(result.conversation.draft.fullName).toBe("محمود");
+    expect(result.conversation.draft.phoneNumber).toBe("+962790000000");
+    expect(result.reply).toContain("متابعة");
+  });
+
+  it("exports isPhoneNumber and validates correctly", () => {
+    expect(isPhoneNumber("+962790000000")).toBe(true);
+    expect(isPhoneNumber("0790000000")).toBe(true);
+    expect(isPhoneNumber("")).toBe(false);
+    expect(isPhoneNumber("abc")).toBe(false);
+    expect(isPhoneNumber("12")).toBe(false);
   });
 
   it("creates and analyzes immediately after location without asking for a description", () => {

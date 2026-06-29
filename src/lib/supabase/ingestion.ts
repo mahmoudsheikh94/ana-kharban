@@ -700,3 +700,51 @@ export async function enforceTelegramRateLimit(telegramUserId: string) {
 
   return true;
 }
+
+// IP-based rate limit for the public, anonymous fix-upload endpoint. Mirrors the Telegram
+// limiter: a fixed window per client IP. Returns false once the cap is hit so the caller can
+// respond 429. Conservative default: 10 uploads / 10 minutes per IP.
+export async function enforceFixUploadRateLimit(clientIp: string) {
+  const supabase = createSupabaseServerClient();
+  const maxRequests = 10;
+  const windowMs = 10 * 60 * 1000;
+  const now = new Date();
+  const { data, error } = await supabase
+    .from("fix_upload_rate_limits")
+    .select("client_ip, window_started_at, request_count")
+    .eq("client_ip", clientIp)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(`Failed to check fix upload rate limit: ${error.message}`);
+  }
+
+  if (!data || now.getTime() - new Date(data.window_started_at).getTime() > windowMs) {
+    const { error: upsertError } = await supabase.from("fix_upload_rate_limits").upsert({
+      client_ip: clientIp,
+      window_started_at: now.toISOString(),
+      request_count: 1
+    });
+
+    if (upsertError) {
+      throw new Error(`Failed to reset fix upload rate limit: ${upsertError.message}`);
+    }
+
+    return true;
+  }
+
+  if (data.request_count >= maxRequests) {
+    return false;
+  }
+
+  const { error: updateError } = await supabase
+    .from("fix_upload_rate_limits")
+    .update({ request_count: data.request_count + 1 })
+    .eq("client_ip", clientIp);
+
+  if (updateError) {
+    throw new Error(`Failed to update fix upload rate limit: ${updateError.message}`);
+  }
+
+  return true;
+}

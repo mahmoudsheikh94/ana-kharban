@@ -1,5 +1,6 @@
 import { EmptyState } from "@/components/empty-state";
 import { PublicShell } from "@/components/public-shell";
+import { TierBadge } from "@/components/tier-badge";
 import { getLeaderboard } from "@/lib/supabase/public";
 import { Trophy } from "lucide-react";
 import Link from "next/link";
@@ -33,7 +34,10 @@ export default async function LeaderboardPage() {
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-bold text-charcoal-950">{volunteer.display_name}</p>
-                  <p className="text-xs text-stone-500">{volunteer.completed_fixes} إصلاح مكتمل</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <TierBadge points={volunteer.total_points} />
+                    <span className="text-xs text-stone-500">{volunteer.completed_fixes} إصلاح مكتمل</span>
+                  </div>
                 </div>
                 <span className="rounded-md bg-emerald-50 px-3 py-1.5 text-sm font-black text-emerald-700 ring-1 ring-emerald-200">
                   {volunteer.total_points} نقطة

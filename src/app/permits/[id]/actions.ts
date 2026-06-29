@@ -2,6 +2,7 @@
 
 import { completePermit, transitionPermit } from "@/lib/supabase/permits";
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 type TransitionTarget = "approved" | "active" | "rejected" | "cancelled";
 
@@ -34,7 +35,15 @@ export async function completePermitAction(formData: FormData) {
     throw new Error("Missing permit ID");
   }
 
-  await completePermit({ permitId, note: note || null });
+  try {
+    await completePermit({ permitId, note: note || null });
+  } catch (error) {
+    if (error instanceof Error && error.message === "PERMIT_NO_FIX_SUBMISSION") {
+      // Can't complete without proof — send the admin back with an inline notice.
+      redirect(`/permits/${permitId}?error=no_fix`);
+    }
+    throw error;
+  }
 
   revalidatePath(`/permits/${permitId}`);
   revalidatePath("/permits");

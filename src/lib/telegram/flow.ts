@@ -19,7 +19,7 @@ function withMessage(conversation: TelegramConversation, messageId: number): Tel
   };
 }
 
-function isPhoneNumber(value: string) {
+export function isPhoneNumber(value: string) {
   return /^\+?[0-9\s-]{8,18}$/.test(value.trim());
 }
 
@@ -49,6 +49,20 @@ export function buildNextStep(
 
   const conversation =
     currentConversation ?? createInitialConversation(input.telegramUserId, input.chatId);
+
+  // Returning reporters are seeded into this state by the webhook (which knows their stored
+  // name/phone). The confirm/edit choice is driven by inline buttons handled in the webhook
+  // callback handler, so the only thing the pure FSM must do here is gently re-prompt a stray
+  // text message back to the buttons — WITHOUT flagging it as an invalid attempt (that would
+  // feed the abuse-lockout counter and could wipe a returning user's conversation) and WITHOUT
+  // capturing the text as a name. The existing draft (fullName/phoneNumber) is preserved.
+  if (conversation.state === "awaiting_identity_confirmation") {
+    return {
+      conversation: withMessage(conversation, input.messageId),
+      reply: "اضغط «متابعة» للتسجيل بنفس بياناتك، أو «تعديل بياناتي» لتغييرها.",
+      readyToSubmit: false
+    };
+  }
 
   if (conversation.state === "awaiting_full_name") {
     if (input.kind !== "text" || input.text.trim().length < 4) {

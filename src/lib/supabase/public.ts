@@ -11,12 +11,26 @@ import type { ReportWithReporter } from "@/lib/reports/types";
 // anon has column-level SELECT on safe columns only (no phone_number / telegram_user_id),
 // so the query below cannot widen the exposure even if it tried.
 function createSupabasePublicClient() {
-  return createClient(getSupabaseUrl(), getSupabasePublishableKey(), {
-    auth: { persistSession: false, autoRefreshToken: false }
+  const key = getSupabasePublishableKey();
+  // New-format `sb_publishable_…` keys are opaque, not JWTs. Supabase rejects them with 401
+  // when they arrive in `Authorization: Bearer …` unless that header EXACTLY equals `apikey`.
+  // supabase-js defaults the Authorization header to `Bearer <key>` for an unauthenticated
+  // client, which fails the JWT parse. Providing `accessToken` makes the client put the raw
+  // key on Authorization (matching `apikey`), the documented way to use a publishable key.
+  // This is version-independent — it does not rely on any particular client default.
+  return createClient(getSupabaseUrl(), key, {
+    accessToken: async () => key
   });
 }
 
 const publicVolunteerColumns = "id, display_name, total_points, completed_fixes, created_at";
+
+// A volunteer who hasn't given a display name carries the internal placeholder "متطوع <id>".
+// Never expose that raw Telegram id publicly — show a neutral anonymous label instead.
+const PLACEHOLDER_NAME_RE = /^متطوع \d+$/;
+function sanitizeVolunteerName(name: string): string {
+  return PLACEHOLDER_NAME_RE.test(name.trim()) ? "متطوع مجهول" : name;
+}
 
 export async function getPublicApprovedReports() {
   const supabase = createSupabasePublicClient();
@@ -57,7 +71,10 @@ export async function getLeaderboard(limit = 50): Promise<PublicVolunteer[]> {
     throw new Error(`Failed to load leaderboard: ${error.message}`);
   }
 
-  return (data ?? []) as PublicVolunteer[];
+  return ((data ?? []) as PublicVolunteer[]).map((v) => ({
+    ...v,
+    display_name: sanitizeVolunteerName(v.display_name)
+  }));
 }
 
 export async function getPublicVolunteer(id: string): Promise<PublicVolunteer | null> {
@@ -72,7 +89,12 @@ export async function getPublicVolunteer(id: string): Promise<PublicVolunteer | 
     throw new Error(`Failed to load volunteer: ${error.message}`);
   }
 
-  return (data as PublicVolunteer) ?? null;
+  if (!data) {
+    return null;
+  }
+
+  const volunteer = data as PublicVolunteer;
+  return { ...volunteer, display_name: sanitizeVolunteerName(volunteer.display_name) };
 }
 
 export type PublicFix = FixSubmission & {

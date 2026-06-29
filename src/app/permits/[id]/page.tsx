@@ -18,10 +18,12 @@ export const dynamic = "force-dynamic";
 
 type PermitDetailPageProps = {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 };
 
-export default async function PermitDetailPage({ params }: PermitDetailPageProps) {
+export default async function PermitDetailPage({ params, searchParams }: PermitDetailPageProps) {
   const { id } = await params;
+  const { error } = await searchParams;
   const permit = await getPermitById(id);
 
   if (!permit) {
@@ -31,7 +33,10 @@ export default async function PermitDetailPage({ params }: PermitDetailPageProps
   const severity = (permit.report?.ai_severity ?? null) as Severity | null;
   const projectedPoints = scoreFix(severity, permit.report?.ai_category ?? null);
   const transitions = nextStatuses(permit.status).filter((status) => status !== "completed");
-  const canComplete = permit.status === "active";
+  const submissionCount = permit.fix_submissions?.length ?? 0;
+  const hasProof = submissionCount > 0;
+  // Completion requires the permit to be active AND have at least one fix submission as proof.
+  const canComplete = permit.status === "active" && hasProof;
 
   return (
     <AppShell
@@ -55,6 +60,16 @@ export default async function PermitDetailPage({ params }: PermitDetailPageProps
           </ReportDetailSection>
 
           <ReportDetailSection title="إجراءات المشرف">
+            {error === "no_fix" ? (
+              <p className="mb-4 rounded-md bg-red-50 p-3 text-sm font-semibold text-red-700 ring-1 ring-red-200">
+                لا يمكن اعتماد الاكتمال قبل أن يرسل المتطوع صورة إصلاح واحدة على الأقل.
+              </p>
+            ) : null}
+            {permit.status === "active" && !hasProof ? (
+              <p className="mb-4 rounded-md bg-amber-50 p-3 text-sm font-semibold text-amber-800 ring-1 ring-amber-200">
+                بانتظار صور الإصلاح من المتطوع قبل أن يصبح الاعتماد متاحاً.
+              </p>
+            ) : null}
             {transitions.length === 0 && !canComplete ? (
               <p className="text-sm text-stone-500">لا توجد إجراءات متاحة لهذه الحالة.</p>
             ) : (
@@ -138,13 +153,26 @@ export default async function PermitDetailPage({ params }: PermitDetailPageProps
             </DetailGrid>
           </ReportDetailSection>
 
-          <ReportDetailSection title={`تقديمات الإصلاح (${permit.fix_submissions?.length ?? 0})`}>
-            {permit.fix_submissions && permit.fix_submissions.length > 0 ? (
-              <div className="grid gap-4 sm:grid-cols-2">
-                {permit.fix_submissions.map((fix) => (
-                  <div key={fix.id} className="overflow-hidden rounded-lg border border-stone-200">
-                    <ReportImage src={fix.image_url} alt="صورة الإصلاح" className="aspect-[4/3] w-full" />
-                    <div className="space-y-2 p-3">
+          <ReportDetailSection title={`قبل / بعد — تقديمات الإصلاح (${submissionCount})`}>
+            {hasProof ? (
+              <div className="space-y-5">
+                {permit.fix_submissions!.map((fix) => (
+                  <div key={fix.id} className="rounded-lg border border-stone-200 p-3">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <figure className="space-y-1">
+                        <figcaption className="text-xs font-bold text-stone-500">قبل (البلاغ)</figcaption>
+                        <ReportImage
+                          src={permit.report?.image_url ?? null}
+                          alt="صورة البلاغ الأصلية"
+                          className="aspect-[4/3] w-full"
+                        />
+                      </figure>
+                      <figure className="space-y-1">
+                        <figcaption className="text-xs font-bold text-emerald-700">بعد (الإصلاح)</figcaption>
+                        <ReportImage src={fix.image_url} alt="صورة الإصلاح" className="aspect-[4/3] w-full" />
+                      </figure>
+                    </div>
+                    <div className="mt-3 space-y-2">
                       <p className="text-xs text-stone-500">{formatDateAr(fix.created_at)}</p>
                       {fix.description ? <p className="text-sm text-charcoal-900">{fix.description}</p> : null}
                       {typeof fix.latitude === "number" && typeof fix.longitude === "number" ? (
@@ -154,7 +182,7 @@ export default async function PermitDetailPage({ params }: PermitDetailPageProps
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 text-xs text-civic-amber hover:text-charcoal-950"
                         >
-                          فتح الموقع
+                          فتح موقع الإصلاح
                           <MapPin className="size-3.5" aria-hidden="true" />
                         </a>
                       ) : null}
@@ -163,7 +191,7 @@ export default async function PermitDetailPage({ params }: PermitDetailPageProps
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-stone-500">لا توجد تقديمات إصلاح بعد. يرسلها المتطوع عبر /submit في تيليجرام أو رابط الرفع.</p>
+              <p className="text-sm text-stone-500">لا توجد تقديمات إصلاح بعد. يرسلها المتطوع عبر الزر في تيليجرام أو رابط الرفع.</p>
             )}
           </ReportDetailSection>
         </div>

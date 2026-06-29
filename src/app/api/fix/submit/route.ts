@@ -1,11 +1,29 @@
 import { getAbuseLimits } from "@/lib/supabase/config";
-import { uploadFixImage } from "@/lib/supabase/ingestion";
-import { createFixSubmission, getPermitForSubmission } from "@/lib/supabase/permits";
+import { enforceFixUploadRateLimit, uploadFixImage } from "@/lib/supabase/ingestion";
+import {
+  checkFixProximity,
+  countFixSubmissions,
+  createFixSubmission,
+  getPermitForSubmission
+} from "@/lib/supabase/permits";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+
+// Hard cap on proofs per permit, so a single permit can't be used to flood image storage.
+const MAX_SUBMISSIONS_PER_PERMIT = 8;
+
+// Best-effort client IP from the proxy headers Vercel/Next set. Falls back to a constant so a
+// missing header degrades to a shared bucket (still rate-limited) rather than no limit at all.
+function clientIpOf(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) {
+    return forwarded.split(",")[0]!.trim();
+  }
+  return request.headers.get("x-real-ip")?.trim() || "unknown";
+}
 
 const fieldsSchema = z.object({
   permit_id: z.string().uuid(),
@@ -45,6 +63,15 @@ function detectImageMime(bytes: Buffer): string | null {
 }
 
 export async function POST(request: Request) {
+  // IP rate limit first, before any parsing or storage work.
+  const allowed = await enforceFixUploadRateLimit(clientIpOf(request));
+  if (!allowed) {
+    return NextResponse.json(
+      { ok: false, error: "Too many uploads. Try again later." },
+      { status: 429 }
+    );
+  }
+
   let form: FormData;
   try {
     form = await request.formData();
@@ -97,6 +124,36 @@ export async function POST(request: Request) {
       { ok: false, error: "Permit is not open for submissions" },
       { status: 409 }
     );
+  }
+
+  // Per-permit submission cap: stops one permit being used to flood storage.
+  const existingCount = await countFixSubmissions(permit.id);
+  if (existingCount >= MAX_SUBMISSIONS_PER_PERMIT) {
+    return NextResponse.json(
+      { ok: false, error: "Submission limit reached for this permit" },
+      { status: 409 }
+    );
+  }
+
+  // GPS proximity: a fix must be submitted near the report it claims to fix. Only enforced
+  // when coordinates are provided; a missing location is allowed (admin still reviews).
+  if (typeof parsed.data.latitude === "number" && typeof parsed.data.longitude === "number") {
+    const proximity = await checkFixProximity(
+      permit.report_id,
+      parsed.data.latitude,
+      parsed.data.longitude
+    );
+    if (!proximity.ok && proximity.reason === "too_far") {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Fix location is too far from the report location",
+          distanceMeters: Math.round(proximity.distanceMeters),
+          toleranceMeters: proximity.toleranceMeters
+        },
+        { status: 422 }
+      );
+    }
   }
 
   try {
